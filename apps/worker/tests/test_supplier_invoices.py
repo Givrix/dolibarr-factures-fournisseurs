@@ -221,7 +221,11 @@ async def test_imports_all_pdfs_and_pays_them(monkeypatch: pytest.MonkeyPatch):
 
     payments = dolibarr.calls_to("supplierinvoicesAddPayment")
     assert len(payments) == 2
-    assert payments[0]["datepaye"] == "2025-06-15"
+    from datetime import datetime, timezone
+
+    assert payments[0]["datepaye"] == int(
+        datetime(2025, 6, 15, tzinfo=timezone.utc).timestamp()
+    )
     assert payments[0]["payment_mode_id"] == 3
     assert payments[0]["accountid"] == 1
     assert payments[0]["closepaidinvoices"] == "yes"
@@ -230,7 +234,7 @@ async def test_imports_all_pdfs_and_pays_them(monkeypatch: pytest.MonkeyPatch):
     lines = dolibarr.calls_to("supplierinvoicesCreateLine")
     assert len(lines) == 2
     assert json.loads(lines[0]["request_data"][0]) == {
-        "desc": "Prestation",
+        "description": "Prestation",
         "qty": 2.0,
         "pu_ht": 50.0,
         "tva_tx": 20.0,
@@ -416,7 +420,7 @@ def test_compute_lines_from_lines():
         lines=[{"description": "Article", "quantity": 2.0, "unit_price_ht": 50.0, "vat_rate": 20.0}]
     )
     assert _compute_lines(invoice) == [
-        {"desc": "Article", "qty": 2.0, "pu_ht": 50.0, "tva_tx": 20.0}
+        {"description": "Article", "qty": 2.0, "pu_ht": 50.0, "tva_tx": 20.0}
     ]
 
 
@@ -435,6 +439,19 @@ def test_unwrap_tool_result_handles_mcp_content():
 
     raw = {"content": [{"type": "text", "text": fake_mcp_result([{"id": "1", "name": "ACME"}])}]}
     assert _unwrap_tool_result(raw) == [{"id": "1", "name": "ACME"}]
+
+
+def test_normalize_date_formats():
+    from worker.workflows.supplier_invoices import _normalize_date
+
+    assert _normalize_date("2016-12-28") == "2016-12-28"
+    assert _normalize_date("28/12/2016") == "2016-12-28"
+    assert _normalize_date("28.12.2016") == "2016-12-28"
+    assert _normalize_date("28 Décembre 2016") == "2016-12-28"
+    assert _normalize_date("1er Mars 2025") == "2025-03-01"
+    assert _normalize_date("28 December 2016") == "2016-12-28"
+    assert _normalize_date(None) is None
+    assert _normalize_date("sans date") is None
 
 
 def test_unwrap_tool_result_handles_double_encoded_json():

@@ -10,6 +10,8 @@ fournisseurs et un nom de fournisseur. Pour chaque PDF :
 
 import json
 import re
+import unicodedata
+from datetime import datetime, timezone
 from typing import Any
 
 import mistralai.workflows as workflows
@@ -54,7 +56,11 @@ class InvoiceLine(pydantic.BaseModel):
 class ExtractedInvoice(pydantic.BaseModel):
     is_invoice: bool = True
     invoice_date: str | None = pydantic.Field(
-        default=None, description="Date de facturation au format YYYY-MM-DD"
+        default=None,
+        description=(
+            "Date de facturation recopiée exactement comme écrite sur la facture "
+            "(ex. « 28 Décembre 2016 », « 28/12/2016 », « 2016-12-28 »)"
+        ),
     )
     supplier_ref: str | None = pydantic.Field(
         default=None, description="Numéro de la facture chez le fournisseur"
@@ -160,6 +166,68 @@ def _norm(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+_MONTHS = {
+    "janvier": 1,
+    "fevrier": 2,
+    "mars": 3,
+    "avril": 4,
+    "mai": 5,
+    "juin": 6,
+    "juillet": 7,
+    "aout": 8,
+    "septembre": 9,
+    "octobre": 10,
+    "novembre": 11,
+    "decembre": 12,
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+
+
+def _strip_accents(value: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c))
+
+
+def _normalize_date(raw: Any) -> str | None:
+    """Normalise une date telle qu'écrite sur une facture en YYYY-MM-DD."""
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", value)
+    if match:
+        year, month, day = (int(part) for part in match.groups())
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    match = re.fullmatch(r"(\d{1,2})[/..-](\d{1,2})[/..-](\d{4})", value)
+    if match:
+        day, month, year = (int(part) for part in match.groups())
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{year:04d}-{month:02d}-{day:02d}"
+    match = re.fullmatch(r"(\d{1,2})(?:er)?\s+([A-Za-zÀ-ÿ]+)\s+(\d{4})", value)
+    if match:
+        month = _MONTHS.get(_strip_accents(match.group(2).lower()))
+        if month:
+            return f"{int(match.group(3)):04d}-{month:02d}-{int(match.group(1)):02d}"
+    return None
+
+
+def _date_to_timestamp(iso_date: str | None) -> int | None:
+    if not iso_date:
+        return None
+    try:
+        return int(datetime.strptime(iso_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return None
+
+
 _EMPTY_LIST_ERROR = re.compile(r"HTTP error 404.*[Nn]o .+ found", re.DOTALL)
 _FORBIDDEN_ERROR = re.compile(r"HTTP error 403", re.DOTALL)
 
@@ -193,7 +261,7 @@ def _compute_lines(invoice: ExtractedInvoice) -> list[dict[str, Any]]:
                     pu_ht = 0.0
             lines.append(
                 {
-                    "desc": line.description,
+                    "description": line.description,
                     "qty": line.quantity,
                     "pu_ht": round(pu_ht, 4),
                     "tva_tx": vat_rate,
@@ -213,7 +281,7 @@ def _compute_lines(invoice: ExtractedInvoice) -> list[dict[str, Any]]:
         pu_ht = base / (1.0 + vat_rate / 100.0)
     return [
         {
-            "desc": f"Facture {invoice.supplier_ref or 'fournisseur'}",
+            "description": f"Facture {invoice.supplier_ref or 'fournisseur'}",
             "qty": 1.0,
             "pu_ht": round(pu_ht, 4),
             "tva_tx": vat_rate,
@@ -345,11 +413,17 @@ async def extract_invoice_data(
     document_name: str,
 ) -> dict[str, Any]:
     client = get_mistral_client(run_as=RunAs.AUTO)
-    text = await client.beta.libraries.documents.text_content_async(
+    raw_text = await client.beta.libraries.documents.text_content_async(
         library_id=library_id, document_id=document_id
     )
-    if isinstance(text, dict):
-        text = text.get("content") or text.get("text") or json.dumps(text)
+    if isinstance(raw_text, str):
+        text = raw_text
+    elif isinstance(raw_text, dict):
+        text = raw_text.get("text") or raw_text.get("content") or json.dumps(raw_text)
+    elif hasattr(raw_text, "text"):
+        text = raw_text.text
+    else:
+        text = str(raw_text)
     if not text or not str(text).strip():
         return {"status": "failed", "detail": "Document illisible ou vide", "invoice": None}
 
@@ -361,10 +435,11 @@ async def extract_invoice_data(
                 "role": "system",
                 "content": (
                     "Tu extrais les données d'une facture fournisseur à partir de son texte "
-                    "(sortie OCR). Réponds uniquement à partir du document. Formats : dates en "
-                    "YYYY-MM-DD, montants en nombres décimaux, prix unitaires hors taxes quand "
-                    "ils sont disponibles, taux de TVA en pourcentage (20 pour 20 %). "
-                    "is_invoice=false si le document n'est pas une facture."
+                    "(sortie OCR). Réponds uniquement à partir du document. Recopie la date de "
+                    "facturation exactement comme elle est écrite (ex. « 28 Décembre 2016 », "
+                    "« 28/12/2016 ») ; ne la convertis pas. Montants en nombres décimaux, prix "
+                    "unitaires hors taxes quand ils sont disponibles, taux de TVA en pourcentage "
+                    "(20 pour 20 %). is_invoice=false si le document n'est pas une facture."
                 ),
             },
             {"role": "user", "content": f"Document : {document_name}\n\n{str(text)[:60000]}"},
@@ -373,8 +448,17 @@ async def extract_invoice_data(
     invoice = response.choices[0].message.parsed
     if invoice is None or not invoice.is_invoice:
         return {"status": "skipped_not_invoice", "detail": None, "invoice": None}
-    if not invoice.invoice_date:
-        return {"status": "failed", "detail": "Date de facturation introuvable", "invoice": None}
+    normalized_date = _normalize_date(invoice.invoice_date)
+    if not normalized_date:
+        return {
+            "status": "failed",
+            "detail": (
+                f"Date de facturation introuvable ou illisible "
+                f"(OCR : {len(str(text))} caractères, valeur lue : {invoice.invoice_date!r})"
+            ),
+            "invoice": None,
+        }
+    invoice.invoice_date = normalized_date
     if invoice.total_ttc is None and invoice.total_ht is None and not invoice.lines:
         return {"status": "failed", "detail": "Aucun montant trouvé dans la facture", "invoice": None}
     return {"status": "ok", "detail": None, "invoice": invoice.model_dump()}
@@ -412,9 +496,11 @@ async def create_supplier_invoice(
     payload: dict[str, Any] = {
         "ref": "auto",
         "socid": supplier_id,
-        "date": extracted.invoice_date,
         "note": f"Importé depuis {document_name} par le workflow Mistral",
     }
+    invoice_timestamp = _date_to_timestamp(extracted.invoice_date)
+    if invoice_timestamp is not None:
+        payload["date"] = invoice_timestamp
     if supplier_ref:
         payload["ref_supplier"] = supplier_ref
 
@@ -455,11 +541,12 @@ async def pay_supplier_invoice(
     comment: str,
     dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
+    payment_timestamp = _date_to_timestamp(payment_date)
     raw = await dolibarr.call_tool(
         TOOL_ADD_SUPPLIER_INVOICE_PAYMENT,
         {
             "id": invoice_id,
-            "datepaye": payment_date,
+            "datepaye": payment_timestamp or payment_date,
             "payment_mode_id": payment_mode_id,
             "closepaidinvoices": "yes",
             "accountid": bank_account_id,
