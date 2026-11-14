@@ -277,6 +277,58 @@ def _date_to_timestamp(iso_date: str | None) -> int | None:
 
 _EMPTY_LIST_ERROR = re.compile(r"HTTP error 404.*[Nn]o .+ found", re.DOTALL)
 _FORBIDDEN_ERROR = re.compile(r"HTTP error 403", re.DOTALL)
+_MANGLED_BODY_ERROR = re.compile(r"field missing|[Ii]nvalid params|request_data", re.DOTALL)
+
+
+def _error_text(error: BaseException) -> str:
+    """Détaille une exception (chaîne de causes incluse) pour le rapport par document."""
+    parts: list[str] = []
+    current: BaseException | None = error
+    while current is not None:
+        text = str(current)
+        if text and text not in parts:
+            parts.append(text)
+        details = getattr(current, "details", None)
+        if details:
+            try:
+                parts.append(json.dumps(details, default=str, ensure_ascii=False))
+            except (TypeError, ValueError):
+                parts.append(str(details))
+        current = current.__cause__
+    return " | ".join(parts) or type(error).__name__
+
+
+async def _call_create(
+    dolibarr: ToolCallClient,
+    tool: str,
+    payload: dict[str, Any],
+    extra: dict[str, Any] | None = None,
+) -> Any:
+    """Appel d'un outil de création Dolibarr.
+
+    L'API attend un objet JSON en corps de requête ; selon la façon dont le
+    connecteur transmet ``request_data``, l'objet direct fonctionne ou il faut
+    passer un tableau contenant l'objet sérialisé. On essaie les deux.
+    """
+    base = dict(extra or {})
+    attempts = [
+        {"request_data": payload},
+        {"request_data": [json.dumps(payload)]},
+        {"request_data": json.dumps(payload)},
+    ]
+    errors: list[str] = []
+    for arguments in attempts:
+        try:
+            return await dolibarr.call_tool(tool, {**base, **arguments})
+        except ConnectorToolCallError as error:
+            text = json.dumps(error.details[0] if error.details else "", default=str)
+            errors.append(text)
+            if not _MANGLED_BODY_ERROR.search(text):
+                raise
+    raise ValueError(
+        f"Appel '{tool}' refusé pour les 3 formats de request_data : "
+        + " || ".join(errors)
+    )
 
 
 async def _call_list(
@@ -362,9 +414,10 @@ async def resolve_supplier(
             f"Fournisseur '{supplier_name}' introuvable dans Dolibarr et création non autorisée"
         )
 
-    raw = await dolibarr.call_tool(
+    raw = await _call_create(
+        dolibarr,
         TOOL_CREATE_THIRDPARTIES,
-        {"request_data": [json.dumps({"name": supplier_name, "fournisseur": 1})]},
+        {"name": supplier_name, "fournisseur": 1},
     )
     created = _unwrap_tool_result(raw)
     if not isinstance(created, dict) or "id" not in created:
@@ -572,10 +625,7 @@ async def create_supplier_invoice(
     if supplier_ref:
         payload["ref_supplier"] = supplier_ref
 
-    raw = await dolibarr.call_tool(
-        TOOL_CREATE_SUPPLIER_INVOICES,
-        {"request_data": [json.dumps(payload)]},
-    )
+    raw = await _call_create(dolibarr, TOOL_CREATE_SUPPLIER_INVOICES, payload)
     created = _unwrap_tool_result(raw)
     if not isinstance(created, dict) or "id" not in created:
         raise ValueError(f"Création de la facture impossible : {created!r}")
@@ -583,9 +633,11 @@ async def create_supplier_invoice(
 
     try:
         for line in _compute_lines(extracted):
-            await dolibarr.call_tool(
+            await _call_create(
+                dolibarr,
                 TOOL_CREATE_SUPPLIER_INVOICE_LINE,
-                {"id": invoice_id, "request_data": [json.dumps(line)]},
+                line,
+                extra={"id": invoice_id},
             )
         await dolibarr.call_tool(TOOL_VALIDATE_SUPPLIER_INVOICE, {"id": invoice_id})
     except Exception:
@@ -750,4 +802,4 @@ async def _process_document(
             amount_paid=paid.get("amount_paid"),
         )
     except Exception as error:
-        return DocumentResult(document=document_name, status="failed", detail=str(error))
+        return DocumentResult(document=document_name, status="failed", detail=_error_text(error))

@@ -228,7 +228,7 @@ async def test_imports_all_pdfs_and_pays_them(monkeypatch: pytest.MonkeyPatch):
 
     lines = dolibarr.calls_to("supplierinvoicesCreateLine")
     assert len(lines) == 2
-    assert json.loads(lines[0]["request_data"][0]) == {
+    assert lines[0]["request_data"] == {
         "description": "Prestation",
         "qty": 2.0,
         "pu_ht": 50.0,
@@ -461,6 +461,42 @@ async def test_max_documents_limits_processing(monkeypatch: pytest.MonkeyPatch):
     )
 
     assert [doc["document"] for doc in result["documents"]] == ["facture-a.pdf"]
+
+
+async def test_create_retries_with_serialized_payload_when_object_rejected(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+
+    async def fake_call_tool(self, tool_name, arguments=None):
+        if tool_name.endswith("createSupplierinvoices") and isinstance(
+            (arguments or {}).get("request_data"), dict
+        ):
+            raise ConnectorToolCallError(
+                "dolibarr",
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Error calling tool 'createSupplierinvoices': HTTP error 400: "
+                                "Bad Request - {'error': {'message': 'Bad Request: socid field missing'}}"
+                            ),
+                        }
+                    ]
+                },
+            )
+        return dolibarr(tool_name, arguments)
+
+    monkeypatch.setattr(ToolCallClient, "call_tool", fake_call_tool)
+    monkeypatch.setattr(si, "get_mistral_client", lambda **kwargs: client)
+
+    result = await run_workflow(
+        monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
+    )
+
+    assert [doc["status"] for doc in result["documents"]] == ["paid", "paid"]
+    created = dolibarr.calls_to("createSupplierinvoices")
+    assert isinstance(created[0]["request_data"], list)
+    assert json.loads(created[0]["request_data"][0])["socid"] == 7
 
 
 def test_compute_lines_from_lines():
