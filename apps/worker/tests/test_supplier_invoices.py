@@ -7,6 +7,7 @@ from temporalio.testing import WorkflowEnvironment
 
 from mistralai.workflows import testing as workflows_testing
 from mistralai.workflows.plugins.mistralai.connectors import ToolCallClient
+from mistralai.workflows.plugins.mistralai.connectors.exceptions import ConnectorToolCallError
 
 import worker.workflows.supplier_invoices as si
 from worker.workflows.supplier_invoices import (
@@ -251,6 +252,38 @@ async def test_existing_supplier_is_reused(monkeypatch: pytest.MonkeyPatch):
     assert result["supplier_id"] == 12
     assert result["supplier_created"] is False
     assert not dolibarr.calls_to("createThirdparties")
+
+
+async def test_dolibarr_404_empty_list_creates_supplier(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+
+    async def fake_call_tool(self, tool_name, arguments=None):
+        if tool_name.endswith("listThirdparties"):
+            raise ConnectorToolCallError(
+                "dolibarr_anelosimus_c428",
+                response={
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Error calling tool 'listThirdparties': HTTP error 404: Not Found - "
+                                "{'error': {'code': 404, 'message': 'Not Found: No third parties found'}}"
+                            ),
+                        }
+                    ]
+                },
+            )
+        return dolibarr(tool_name, arguments)
+
+    monkeypatch.setattr(ToolCallClient, "call_tool", fake_call_tool)
+    monkeypatch.setattr(si, "get_mistral_client", lambda **kwargs: client)
+
+    result = await run_workflow(
+        monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
+    )
+
+    assert result["supplier_created"] is True
+    assert dolibarr.calls_to("createThirdparties")
 
 
 async def test_supplier_missing_fails_workflow(monkeypatch: pytest.MonkeyPatch):

@@ -9,6 +9,7 @@ fournisseurs et un nom de fournisseur. Pour chaque PDF :
 """
 
 import json
+import re
 from typing import Any
 
 import mistralai.workflows as workflows
@@ -21,6 +22,7 @@ from mistralai.workflows.plugins.mistralai.connectors import (
     connector,
     uses_connectors,
 )
+from mistralai.workflows.plugins.mistralai.connectors.exceptions import ConnectorToolCallError
 
 DOLIBARR_CONNECTOR_NAME = "dolibarr_anelosimus_c428"
 dolibarr_connector = connector(DOLIBARR_CONNECTOR_NAME)
@@ -146,6 +148,25 @@ def _norm(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+_EMPTY_LIST_ERROR = re.compile(r"HTTP error 404.*[Nn]o .+ found", re.DOTALL)
+
+
+async def _call_list(
+    dolibarr: ToolCallClient,
+    tool: str,
+    arguments: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Appel de liste Dolibarr ; l'API renvoie 404 « No ... found » quand la liste est vide."""
+    try:
+        raw = await dolibarr.call_tool(tool, arguments)
+    except ConnectorToolCallError as error:
+        text = json.dumps(error.details[0] if error.details else "", default=str)
+        if _EMPTY_LIST_ERROR.search(text):
+            return []
+        raise
+    return _data_list(_unwrap_tool_result(raw))
+
+
 def _compute_lines(invoice: ExtractedInvoice) -> list[dict[str, Any]]:
     if invoice.lines:
         lines = []
@@ -193,14 +214,14 @@ async def resolve_supplier(
     create_if_missing: bool,
     dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
-    raw = await dolibarr.call_tool(
+    candidates = await _call_list(
+        dolibarr,
         TOOL_LIST_THIRDPARTIES,
         {
             "sqlfilters": f"((t.nom:like:'{supplier_name}%') or (t.name_alias:like:'{supplier_name}%'))",
             "limit": 100,
         },
     )
-    candidates = _data_list(_unwrap_tool_result(raw))
     for thirdparty in candidates:
         if _norm(thirdparty.get("name") or thirdparty.get("nom")) == _norm(supplier_name):
             return {"id": int(thirdparty["id"]), "name": thirdparty.get("name"), "created": False}
@@ -225,8 +246,7 @@ async def resolve_payment_mode(
     payment_mode_code: str,
     dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
-    raw = await dolibarr.call_tool(TOOL_LIST_PAYMENT_TYPES, {"limit": 200})
-    payment_types = _data_list(_unwrap_tool_result(raw))
+    payment_types = await _call_list(dolibarr, TOOL_LIST_PAYMENT_TYPES, {"limit": 200})
     for payment_type in payment_types:
         if _norm(payment_type.get("code")) == _norm(payment_mode_code):
             return {"id": int(payment_type["id"]), "label": payment_type.get("label", payment_mode_code)}
@@ -247,8 +267,7 @@ async def resolve_bank_account(
     bank_account_id: int,
     dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
-    raw = await dolibarr.call_tool(TOOL_LIST_BANK_ACCOUNTS, {"limit": 200})
-    accounts = _data_list(_unwrap_tool_result(raw))
+    accounts = await _call_list(dolibarr, TOOL_LIST_BANK_ACCOUNTS, {"limit": 200})
     for account in accounts:
         if int(account.get("id", -1)) == bank_account_id:
             return {"id": bank_account_id, "label": account.get("label", str(bank_account_id))}
@@ -340,7 +359,8 @@ async def create_supplier_invoice(
     supplier_ref = (extracted.supplier_ref or "").strip()
 
     if supplier_ref:
-        raw = await dolibarr.call_tool(
+        existing = await _call_list(
+            dolibarr,
             TOOL_LIST_SUPPLIER_INVOICES,
             {
                 "thirdparty_ids": str(supplier_id),
@@ -348,7 +368,6 @@ async def create_supplier_invoice(
                 "limit": 10,
             },
         )
-        existing = _data_list(_unwrap_tool_result(raw))
         if existing:
             return {
                 "status": "skipped_duplicate",
