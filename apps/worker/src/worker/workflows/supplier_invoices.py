@@ -280,6 +280,27 @@ _FORBIDDEN_ERROR = re.compile(r"HTTP error 403", re.DOTALL)
 _MANGLED_BODY_ERROR = re.compile(r"field missing|[Ii]nvalid params|request_data", re.DOTALL)
 
 
+def _create_arg_candidates(payload: dict[str, Any], base: dict[str, Any]) -> list[dict[str, Any]]:
+    """Formats d'arguments essayés en cascade pour transmettre le corps JSON à Dolibarr.
+
+    Le schéma MCP exposé par le connecteur déclare ``request_data`` comme tableau
+    de chaînes, alors que l'API Restler attend un objet JSON en corps de requête ;
+    selon la façon dont la passerelle transmet les arguments, un seul de ces
+    formats arrive intact. Le premier qui produit un corps exploitable gagne ;
+    les suivants ne sont essayés que si Dolibarr signale un corps déformé.
+    """
+    serialized = json.dumps(payload)
+    return [
+        {"request_data": payload, **base},
+        {"body": payload, **base},
+        {**payload, **base},
+        {"request_data": [serialized], **base},
+        {"body": [serialized], **base},
+        {"request_data": serialized, **base},
+        {"body": serialized, **base},
+    ]
+
+
 def _error_text(error: BaseException) -> str:
     """Détaille une exception (chaîne de causes incluse) pour le rapport par document."""
     parts: list[str] = []
@@ -306,27 +327,24 @@ async def _call_create(
 ) -> Any:
     """Appel d'un outil de création Dolibarr.
 
-    L'API attend un objet JSON en corps de requête ; selon la façon dont le
-    connecteur transmet ``request_data``, l'objet direct fonctionne ou il faut
-    passer un tableau contenant l'objet sérialisé. On essaie les deux.
+    Essaie chaque format d'arguments de :func:`_create_arg_candidates` jusqu'à
+    ce que Dolibarr accepte le corps de la requête ; une erreur qui ne ressemble
+    pas à un corps déformé (ex. tiers introuvable, droits manquants) interrompt
+    la cascade immédiatement.
     """
     base = dict(extra or {})
-    attempts = [
-        {"request_data": payload},
-        {"request_data": [json.dumps(payload)]},
-        {"request_data": json.dumps(payload)},
-    ]
+    attempts = _create_arg_candidates(payload, base)
     errors: list[str] = []
     for arguments in attempts:
         try:
-            return await dolibarr.call_tool(tool, {**base, **arguments})
+            return await dolibarr.call_tool(tool, {**arguments})
         except ConnectorToolCallError as error:
             text = json.dumps(error.details[0] if error.details else "", default=str)
             errors.append(text)
             if not _MANGLED_BODY_ERROR.search(text):
                 raise
     raise ValueError(
-        f"Appel '{tool}' refusé pour les 3 formats de request_data : "
+        f"Appel '{tool}' refusé pour les {len(attempts)} formats de request_data : "
         + " || ".join(errors)
     )
 

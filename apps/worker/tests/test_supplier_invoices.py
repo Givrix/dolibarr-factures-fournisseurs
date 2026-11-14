@@ -467,8 +467,13 @@ async def test_create_retries_with_serialized_payload_when_object_rejected(monke
     dolibarr, client = base_fixtures()
 
     async def fake_call_tool(self, tool_name, arguments=None):
-        if tool_name.endswith("createSupplierinvoices") and isinstance(
-            (arguments or {}).get("request_data"), dict
+        arguments = arguments or {}
+        request_data = arguments.get("request_data")
+        if tool_name.endswith("createSupplierinvoices") and not (
+            isinstance(request_data, list)
+            and len(request_data) == 1
+            and isinstance(request_data[0], str)
+            and json.loads(request_data[0]).get("socid") == 7
         ):
             raise ConnectorToolCallError(
                 "dolibarr",
