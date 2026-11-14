@@ -41,7 +41,7 @@ async def main() -> int:
     parser.add_argument("--document-id", nargs="*", default=[], help="IDs de documents à traiter (tous si vide)")
     parser.add_argument("--no-create-supplier", action="store_true", help="Ne pas créer le fournisseur absent")
     parser.add_argument("--dry-run", action="store_true", help="Extraction seule, aucune écriture dans Dolibarr")
-    parser.add_argument("--deployment", default=None, help="Nom du déploiement (local : laisser vide)")
+    parser.add_argument("--deployment", default=None, help="Nom du déploiement (défaut : DEPLOYMENT_NAME du .env)")
     args = parser.parse_args()
 
     load_env()
@@ -53,8 +53,9 @@ async def main() -> int:
 
     client = get_mistral_client(api_key=os.environ["MISTRAL_API_KEY"])
     kwargs = {}
-    if args.deployment:
-        kwargs["deployment_name"] = args.deployment
+    deployment = args.deployment or os.environ.get("DEPLOYMENT_NAME")
+    if deployment:
+        kwargs["deployment_name"] = deployment
 
     execution = await client.workflows.execute_workflow_async(
         workflow_identifier="dolibarr-supplier-invoices-import",

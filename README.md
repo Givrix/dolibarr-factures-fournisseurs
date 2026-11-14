@@ -74,8 +74,11 @@ Les commandes se lancent **depuis la racine du dépôt** (là où se trouvent `a
 et `package.json`), pas depuis `apps/`.
 
 ```bash
-# 1. Clé API
+# 1. Clé API + nom de déploiement
 cp .env.example .env            # puis renseignez MISTRAL_API_KEY
+# DEPLOYMENT_NAME (prérempli : dolibarr-factures-fournisseurs-dev) est requis :
+# il nomme le déploiement du worker et la file de tâche ; le worker s'y
+# enregistre et les exécutions y sont routées. Gardez la même valeur partout.
 
 # 2. Dépendances (bun + uv)
 bash tools/install.sh
