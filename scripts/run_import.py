@@ -6,7 +6,10 @@ Usage :
     uv run python scripts/run_import.py --library "lib-abc123" --supplier "ACME" --document-id doc-1 doc-2
 
 Nécessite MISTRAL_API_KEY (variable d'environnement ou .env à la racine du dépôt)
-et un worker en cours d'exécution (`mistral apps dev`).
+et un worker en cours d'exécution (`mistral apps dev`, lancé depuis la racine du dépôt).
+
+Lancer via le workspace uv :
+    bash tools/uv.sh run --all-packages python scripts/run_import.py --help
 """
 
 import argparse

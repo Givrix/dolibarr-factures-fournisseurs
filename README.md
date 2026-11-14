@@ -61,9 +61,8 @@ les données de chaque PDF et retourne ce qui serait créé, sans rien écrire d
 ## Développement
 
 ```bash
-cd apps/worker
-uv sync --extra dev
-uv run pytest
+bash tools/install.sh          # bun install + uv sync (workspace complet)
+bash tools/uv.sh run --package worker pytest
 ```
 
 ## Test local
@@ -71,21 +70,25 @@ uv run pytest
 Prérequis sur la machine : [uv](https://docs.astral.sh/uv/getting-started/installation/),
 [Bun](https://bun.sh/docs/installation) et la CLI Mistral (`mistral`).
 
+Les commandes se lancent **depuis la racine du dépôt** (là où se trouvent `apps.json`
+et `package.json`), pas depuis `apps/`.
+
 ```bash
 # 1. Clé API
 cp .env.example .env            # puis renseignez MISTRAL_API_KEY
 
-# 2. Dépendances + worker (laisser tourner)
-cd apps/worker && uv sync --extra dev
-cd .. && mistral apps dev
+# 2. Dépendances (bun + uv)
+bash tools/install.sh
 
-# 3. Dans un autre terminal, premier essai sans écriture dans Dolibarr
-cd apps/worker
-uv run python ../../scripts/run_import.py \
+# 3. Worker local avec rechargement (laisser tourner)
+mistral apps dev
+
+# 4. Dans un autre terminal, premier essai sans écriture dans Dolibarr
+bash tools/uv.sh run --all-packages python scripts/run_import.py \
     --library "Factures fournisseurs" --supplier "ACME" --dry-run
 
-# 4. Import réel
-uv run python ../../scripts/run_import.py \
+# 5. Import réel
+bash tools/uv.sh run --all-packages python scripts/run_import.py \
     --library "Factures fournisseurs" --supplier "ACME"
 ```
 

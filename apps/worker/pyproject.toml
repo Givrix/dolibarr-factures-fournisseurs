@@ -2,24 +2,33 @@
 name = "worker"
 version = "0.1.0"
 description = "Worker Mistral Workflows : import de factures fournisseurs PDF dans Dolibarr"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"
 dependencies = [
+    "utils",
+    "env",
+    "mistralai>=3.6.0",
     "mistralai-workflows[mistralai]>=3.19",
-    "pydantic>=2.0",
+    "pydantic>=2.14.1",
+    "structlog>=25.5.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["uv_build>=0.8.22,<0.14.0"]
+build-backend = "uv_build"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/worker"]
+[tool.uv.build-backend]
+module-name = "worker"
+
+[tool.uv.sources]
+utils = { workspace = true }
+env = { workspace = true }
+mistralai-workflows = { index = "pypi" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
