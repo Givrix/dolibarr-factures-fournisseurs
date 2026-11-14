@@ -86,9 +86,12 @@ bash tools/install.sh
 # 3. Worker local avec rechargement (laisser tourner)
 mistral apps dev
 
-# 4. Dans un autre terminal, premier essai sans écriture dans Dolibarr
+# 4. Dans un autre terminal, premier essai sans écriture dans Dolibarr :
+# --pdf-dir téléverse les PDF du dossier dans la bibliothèque Mistral
+# (créée si elle n'existe pas) avant de lancer l'import.
 bash tools/uv.sh run --all-packages python scripts/run_import.py \
-    --library "Factures fournisseurs" --supplier "ACME" --dry-run
+    --library "Factures fournisseurs" --supplier "ACME" \
+    --pdf-dir ./factures --dry-run
 
 # 5. Import réel
 bash tools/uv.sh run --all-packages python scripts/run_import.py \
