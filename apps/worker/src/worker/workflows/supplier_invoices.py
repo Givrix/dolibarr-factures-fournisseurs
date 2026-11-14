@@ -124,9 +124,12 @@ def _unwrap_tool_result(raw: Any) -> Any:
         return raw
     if isinstance(raw, str):
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except json.JSONDecodeError:
             return raw
+        if isinstance(parsed, str):
+            return parsed if parsed == raw else _unwrap_tool_result(parsed)
+        return _unwrap_tool_result(parsed)
     if isinstance(raw, dict):
         content = raw.get("content")
         if isinstance(content, list) and content:
@@ -139,6 +142,8 @@ def _unwrap_tool_result(raw: Any) -> Any:
             if len(texts) == 1:
                 return _unwrap_tool_result(texts[0])
             return [_unwrap_tool_result(t) for t in texts]
+        if set(raw.keys()) == {"result"}:
+            return _unwrap_tool_result(raw["result"])
         return raw
     return raw
 
@@ -284,7 +289,10 @@ async def resolve_payment_mode(
         f"{pt.get('code', '?')}={pt.get('label', '?')} (id {pt.get('id', '?')})"
         for pt in payment_types
     )
-    raise ValueError(f"Mode de paiement '{payment_mode_code}' introuvable. Disponibles : {available}")
+    raise ValueError(
+        f"Mode de paiement '{payment_mode_code}' introuvable. Disponibles : {available or 'aucun'}. "
+        "Sinon, passez l'ID exact via payment_mode_id (--payment-mode-id)"
+    )
 
 
 @workflows.activity(name="dolibarr-resolve-bank-account")

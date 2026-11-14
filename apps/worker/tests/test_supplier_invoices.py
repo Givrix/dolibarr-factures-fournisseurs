@@ -34,6 +34,12 @@ REAL_ACTIVITIES = [
 TASK_QUEUE = "test-task-queue"
 
 
+
+def fake_mcp_result(payload: Any) -> str:
+    """Texte MCP tel que le renvoie le connecteur FastMCP (enveloppe {"result": ...})."""
+    return json.dumps({"result": payload})
+
+
 class FakeDolibarr:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -43,27 +49,27 @@ class FakeDolibarr:
     def __call__(self, tool_name: str, arguments: dict[str, Any] | None = None) -> Any:
         self.calls.append((tool_name, arguments or {}))
         if tool_name.endswith("listThirdparties"):
-            return {"content": [{"type": "text", "text": json.dumps([])}]}
+            return {"content": [{"type": "text", "text": fake_mcp_result([])}]}
         if tool_name.endswith("createThirdparties"):
-            return {"content": [{"type": "text", "text": json.dumps({"id": 7, "name": "ACME"})}]}
+            return {"content": [{"type": "text", "text": fake_mcp_result({"id": 7, "name": "ACME"})}]}
         if tool_name.endswith("listSupplierinvoices"):
-            return {"content": [{"type": "text", "text": json.dumps(self.existing_invoices)}]}
+            return {"content": [{"type": "text", "text": fake_mcp_result(self.existing_invoices)}]}
         if tool_name.endswith("createSupplierinvoices"):
             invoice = {"id": self.next_invoice_id, "ref": f"FF{self.next_invoice_id}"}
             self.next_invoice_id += 1
-            return {"content": [{"type": "text", "text": json.dumps(invoice)}]}
+            return {"content": [{"type": "text", "text": fake_mcp_result(invoice)}]}
         if tool_name.endswith("supplierinvoicesCreateLine"):
-            return {"content": [{"type": "text", "text": json.dumps({"id": 1})}]}
+            return {"content": [{"type": "text", "text": fake_mcp_result({"id": 1})}]}
         if tool_name.endswith("supplierinvoicesValidate"):
-            return {"content": [{"type": "text", "text": json.dumps({"id": 1})}]}
+            return {"content": [{"type": "text", "text": fake_mcp_result({"id": 1})}]}
         if tool_name.endswith("supplierinvoicesAddPayment"):
-            return {"content": [{"type": "text", "text": json.dumps({"id": 1, "amount": 120.0})}]}
+            return {"content": [{"type": "text", "text": fake_mcp_result({"id": 1, "amount": 120.0})}]}
         if tool_name.endswith("setupRetrievePaymentTypes"):
             return {
                 "content": [
                     {
                         "type": "text",
-                        "text": json.dumps(
+                        "text": fake_mcp_result(
                             [
                                 {"id": 2, "code": "VIR", "label": "Virement"},
                                 {"id": 3, "code": "PRE", "label": "Prélèvement"},
@@ -75,7 +81,7 @@ class FakeDolibarr:
         if tool_name.endswith("listBankaccounts"):
             return {
                 "content": [
-                    {"type": "text", "text": json.dumps([{"id": 1, "label": "Compte courant"}])}
+                    {"type": "text", "text": fake_mcp_result([{"id": 1, "label": "Compte courant"}])}
                 ]
             }
         raise AssertionError(f"Outil Dolibarr inattendu : {tool_name}")
@@ -238,7 +244,7 @@ async def test_existing_supplier_is_reused(monkeypatch: pytest.MonkeyPatch):
     async def fake_call_tool(self, tool_name, arguments=None):
         if tool_name.endswith("listThirdparties"):
             return {
-                "content": [{"type": "text", "text": json.dumps([{"id": 12, "name": "acme"}])}]
+                "content": [{"type": "text", "text": fake_mcp_result([{"id": 12, "name": "acme"}])}]
             }
         return dolibarr(tool_name, arguments)
 
@@ -427,8 +433,16 @@ def test_compute_lines_from_totals_only():
 def test_unwrap_tool_result_handles_mcp_content():
     from worker.workflows.supplier_invoices import _unwrap_tool_result
 
-    raw = {"content": [{"type": "text", "text": json.dumps([{"id": "1", "name": "ACME"}])}]}
+    raw = {"content": [{"type": "text", "text": fake_mcp_result([{"id": "1", "name": "ACME"}])}]}
     assert _unwrap_tool_result(raw) == [{"id": "1", "name": "ACME"}]
+
+
+def test_unwrap_tool_result_handles_double_encoded_json():
+    from worker.workflows.supplier_invoices import _unwrap_tool_result
+
+    raw = json.dumps({"result": [{"id": 3, "code": "PRE"}]})
+    double_encoded = json.dumps(raw)
+    assert _unwrap_tool_result(double_encoded) == [{"id": 3, "code": "PRE"}]
 
 
 async def test_dry_run_writes_nothing(monkeypatch: pytest.MonkeyPatch):
@@ -437,7 +451,7 @@ async def test_dry_run_writes_nothing(monkeypatch: pytest.MonkeyPatch):
     async def fake_call_tool(self, tool_name, arguments=None):
         if tool_name.endswith("listThirdparties"):
             return {
-                "content": [{"type": "text", "text": json.dumps([{"id": 7, "name": "ACME"}])}]
+                "content": [{"type": "text", "text": fake_mcp_result([{"id": 7, "name": "ACME"}])}]
             }
         return dolibarr(tool_name, arguments)
 
