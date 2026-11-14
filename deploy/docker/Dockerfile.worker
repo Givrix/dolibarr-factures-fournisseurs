@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+COPY apps/worker/pyproject.toml apps/worker/uv.lock ./apps/worker/
+RUN cd apps/worker && uv sync --frozen --no-dev --no-install-project
+
+COPY apps/worker ./apps/worker
+RUN cd apps/worker && uv sync --frozen --no-dev
+
+ENV PYTHONPATH=/app/apps/worker/src
+
+CMD ["uv", "run", "--project", "/app/apps/worker", "python", "-m", "worker.entrypoints.worker"]
