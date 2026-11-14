@@ -1,2 +1,95 @@
 # dolibarr-factures-fournisseurs
-AI Workflow filling the forms of Dolibarr to input invoices and consider them paid.
+
+Workflow Mistral qui importe un dossier de PDF de factures fournisseurs dans Dolibarr :
+chaque facture est créée, validée, puis réglée **par prélèvement** à sa **date de
+facturation**, sur le **compte bancaire 1** (paramétrable).
+
+## Fonctionnement
+
+Entrée du workflow `dolibarr-supplier-invoices-import` :
+
+```json
+{
+  "library_name_or_id": "Factures fournisseurs",
+  "supplier_name": "ACME",
+  "bank_account_id": 1,
+  "payment_mode_code": "PRE",
+  "create_missing_supplier": true,
+  "document_ids": [],
+  "dry_run": false
+}
+```
+
+| Paramètre | Défaut | Rôle |
+|---|---|---|
+| `library_name_or_id` | — | Bibliothèque Mistral contenant les PDF de factures |
+| `supplier_name` | — | Nom du fournisseur dans Dolibarr |
+| `bank_account_id` | `1` | Compte bancaire Dolibarr à débiter |
+| `payment_mode_code` | `PRE` | Mode de paiement Dolibarr (prélèvement) |
+| `create_missing_supplier` | `true` | Crée le tiers fournisseur s'il n'existe pas |
+| `document_ids` | `[]` | Restreint l'import à certains documents (tous les PDF si vide) |
+| `dry_run` | `false` | Si vrai : extraction seule, aucune écriture dans Dolibarr |
+
+Pour chaque PDF de la bibliothèque :
+
+1. **Extraction** : le texte OCR de la bibliothèque est analysé par `mistral-medium-latest`
+   (sortie structurée : date, référence fournisseur, lignes, totaux, TVA).
+2. **Anti-doublon** : si une facture fournisseur avec la même `ref_supplier` existe déjà
+   pour ce tiers, le document est marqué `skipped_duplicate`.
+3. **Création** : facture fournisseur créée (`ref: auto`), lignes ajoutées, facture validée.
+   En cas d'échec (lignes/validation), la facture brouillon est supprimée.
+4. **Règlement** : paiement ajouté avec `closepaidinvoices=yes`, à la date de facturation,
+   sur le compte bancaire choisi, avec le mode de paiement trouvé dans le dictionnaire
+   Dolibarr (code `PRE`, sinon libellé contenant « prélèvement »).
+
+Statuts par document : `paid`, `dry_run`, `skipped_duplicate`, `skipped_not_invoice`, `failed`.
+
+Pour un premier essai sans risque, lancez le workflow avec `"dry_run": true` : il extrait
+les données de chaque PDF et retourne ce qui serait créé, sans rien écrire dans Dolibarr.
+
+## Prérequis
+
+1. **Bibliothèque Mistral** : créez une bibliothèque dans Mistral Studio et téléversez-y
+   les PDF de factures. Partagez-la avec le workspace si le workflow tourne sans identité
+   utilisateur (schedule/webhook).
+2. **Connecteur Dolibarr** : le connecteur `dolibarr_anelosimus_c428` doit avoir des
+   identifiants valides (portée utilisateur : le workflow tourne `on_behalf_of`, avec
+   l'identité de l'utilisateur qui le lance).
+3. **Dolibarr** : le dictionnaire des modes de paiement doit contenir le prélèvement
+   (code `PRE`) et le compte bancaire `1` doit exister.
+
+## Développement
+
+```bash
+cd apps/worker
+uv sync --extra dev
+uv run pytest
+```
+
+## Test local
+
+Prérequis sur la machine : [uv](https://docs.astral.sh/uv/getting-started/installation/),
+[Bun](https://bun.sh/docs/installation) et la CLI Mistral (`mistral`).
+
+```bash
+# 1. Clé API
+cp .env.example .env            # puis renseignez MISTRAL_API_KEY
+
+# 2. Dépendances + worker (laisser tourner)
+cd apps/worker && uv sync --extra dev
+cd .. && mistral apps dev
+
+# 3. Dans un autre terminal, premier essai sans écriture dans Dolibarr
+cd apps/worker
+uv run python ../../scripts/run_import.py \
+    --library "Factures fournisseurs" --supplier "ACME" --dry-run
+
+# 4. Import réel
+uv run python ../../scripts/run_import.py \
+    --library "Factures fournisseurs" --supplier "ACME"
+```
+
+## Déploiement
+
+Le déploiement géré se fait depuis un dépôt GitHub (`deploy/docker/Dockerfile.worker`).
+Nom de déploiement conseillé : `dolibarr-factures-fournisseurs-worker`.
