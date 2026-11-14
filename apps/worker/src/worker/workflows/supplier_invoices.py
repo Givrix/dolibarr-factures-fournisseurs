@@ -25,17 +25,16 @@ from mistralai.workflows.plugins.mistralai.connectors import (
 DOLIBARR_CONNECTOR_NAME = "dolibarr_anelosimus_c428"
 dolibarr_connector = connector(DOLIBARR_CONNECTOR_NAME)
 
-_TOOL_PREFIX = DOLIBARR_CONNECTOR_NAME + "_"
-TOOL_LIST_THIRDPARTIES = _TOOL_PREFIX + "listThirdparties"
-TOOL_CREATE_THIRDPARTIES = _TOOL_PREFIX + "createThirdparties"
-TOOL_LIST_SUPPLIER_INVOICES = _TOOL_PREFIX + "listSupplierinvoices"
-TOOL_CREATE_SUPPLIER_INVOICES = _TOOL_PREFIX + "createSupplierinvoices"
-TOOL_CREATE_SUPPLIER_INVOICE_LINE = _TOOL_PREFIX + "supplierinvoicesCreateLine"
-TOOL_VALIDATE_SUPPLIER_INVOICE = _TOOL_PREFIX + "supplierinvoicesValidate"
-TOOL_ADD_SUPPLIER_INVOICE_PAYMENT = _TOOL_PREFIX + "supplierinvoicesAddPayment"
-TOOL_REMOVE_SUPPLIER_INVOICE = _TOOL_PREFIX + "removeSupplierinvoices"
-TOOL_LIST_PAYMENT_TYPES = _TOOL_PREFIX + "setupRetrievePaymentTypes"
-TOOL_LIST_BANK_ACCOUNTS = _TOOL_PREFIX + "listBankaccounts"
+TOOL_LIST_THIRDPARTIES = "listThirdparties"
+TOOL_CREATE_THIRDPARTIES = "createThirdparties"
+TOOL_LIST_SUPPLIER_INVOICES = "listSupplierinvoices"
+TOOL_CREATE_SUPPLIER_INVOICES = "createSupplierinvoices"
+TOOL_CREATE_SUPPLIER_INVOICE_LINE = "supplierinvoicesCreateLine"
+TOOL_VALIDATE_SUPPLIER_INVOICE = "supplierinvoicesValidate"
+TOOL_ADD_SUPPLIER_INVOICE_PAYMENT = "supplierinvoicesAddPayment"
+TOOL_REMOVE_SUPPLIER_INVOICE = "removeSupplierinvoices"
+TOOL_LIST_PAYMENT_TYPES = "setupRetrievePaymentTypes"
+TOOL_LIST_BANK_ACCOUNTS = "listBankaccounts"
 
 EXTRACTION_MODEL = "mistral-medium-latest"
 DEFAULT_VAT_RATE = 20.0

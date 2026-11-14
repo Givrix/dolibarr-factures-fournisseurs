@@ -50,8 +50,9 @@ async def main() -> int:
         return 1
 
     from mistralai.workflows.client import get_mistral_client
+    from mistralai.workflows.core.auth import RunAs
 
-    client = get_mistral_client(api_key=os.environ["MISTRAL_API_KEY"])
+    client = get_mistral_client(api_key=os.environ["MISTRAL_API_KEY"], run_as=RunAs.DEPLOYMENT)
     kwargs = {}
     deployment = args.deployment or os.environ.get("DEPLOYMENT_NAME")
     if deployment:
