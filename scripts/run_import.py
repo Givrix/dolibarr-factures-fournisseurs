@@ -38,6 +38,12 @@ async def main() -> int:
     parser.add_argument("--supplier", required=True, help="Nom du fournisseur dans Dolibarr")
     parser.add_argument("--bank-account", type=int, default=1, help="ID du compte bancaire (défaut : 1)")
     parser.add_argument("--payment-mode", default="PRE", help="Code du mode de paiement (défaut : PRE)")
+    parser.add_argument(
+        "--payment-mode-id",
+        type=int,
+        default=None,
+        help="ID Dolibarr du mode de paiement (évite la lecture des dictionnaires, si 403)",
+    )
     parser.add_argument("--document-id", nargs="*", default=[], help="IDs de documents à traiter (tous si vide)")
     parser.add_argument("--no-create-supplier", action="store_true", help="Ne pas créer le fournisseur absent")
     parser.add_argument("--dry-run", action="store_true", help="Extraction seule, aucune écriture dans Dolibarr")
@@ -65,6 +71,7 @@ async def main() -> int:
             "supplier_name": args.supplier,
             "bank_account_id": args.bank_account,
             "payment_mode_code": args.payment_mode,
+            "payment_mode_id": args.payment_mode_id,
             "create_missing_supplier": not args.no_create_supplier,
             "document_ids": args.document_id,
             "dry_run": args.dry_run,

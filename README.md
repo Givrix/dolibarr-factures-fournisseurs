@@ -95,6 +95,17 @@ bash tools/uv.sh run --all-packages python scripts/run_import.py \
     --library "Factures fournisseurs" --supplier "ACME"
 ```
 
+## Dépannage
+
+**Erreur 403 sur les modes de paiement** : la lecture des dictionnaires Dolibarr
+(`setupRetrievePaymentTypes`) exige que l'utilisateur API ait un droit de lecture
+factures, propales ou commandes clients (source Dolibarr 24.0, `api_setup.class.php`).
+Deux options :
+
+- accorder le droit dans Dolibarr : Utilisateurs & Groupes → permissions de l'utilisateur API ;
+- ou passer l'ID directement : `--payment-mode-id <id>` (ID visible dans Dolibarr,
+  Tiers → dictionnaires → modes de paiement, ou table `llx_c_paiement`).
+
 ## Déploiement
 
 Le déploiement géré se fait depuis un dépôt GitHub (`deploy/docker/Dockerfile.worker`).

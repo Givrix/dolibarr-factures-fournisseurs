@@ -103,6 +103,13 @@ class SupplierInvoiceImportInput(pydantic.BaseModel):
         default_factory=list,
         description="Restreindre l'import à ces IDs de documents (tous les PDF si vide)",
     )
+    payment_mode_id: int | None = pydantic.Field(
+        default=None,
+        description=(
+            "ID Dolibarr du mode de paiement (table llx_c_paiement). S'il est fourni, "
+            "la lecture des dictionnaires est évitée (utile si l'API renvoie 403)"
+        ),
+    )
     dry_run: bool = pydantic.Field(
         default=False,
         description="Si vrai : extraction seule, aucune écriture dans Dolibarr",
@@ -149,6 +156,7 @@ def _norm(value: Any) -> str:
 
 
 _EMPTY_LIST_ERROR = re.compile(r"HTTP error 404.*[Nn]o .+ found", re.DOTALL)
+_FORBIDDEN_ERROR = re.compile(r"HTTP error 403", re.DOTALL)
 
 
 async def _call_list(
@@ -247,9 +255,23 @@ async def resolve_supplier(
 @workflows.activity(name="dolibarr-resolve-payment-mode")
 async def resolve_payment_mode(
     payment_mode_code: str,
+    payment_mode_id: int | None = None,
     dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
-    payment_types = await _call_list(dolibarr, TOOL_LIST_PAYMENT_TYPES, {"limit": 200})
+    if payment_mode_id is not None:
+        return {"id": payment_mode_id, "label": payment_mode_code}
+    try:
+        payment_types = await _call_list(dolibarr, TOOL_LIST_PAYMENT_TYPES, {"limit": 200})
+    except ConnectorToolCallError as error:
+        text = json.dumps(error.details[0] if error.details else "", default=str)
+        if _FORBIDDEN_ERROR.search(text):
+            raise ValueError(
+                "L'utilisateur API Dolibarr n'a pas le droit de lire les dictionnaires "
+                "(setup) : accordez-lui la lecture des factures, propales ou commandes dans "
+                "Dolibarr (Utilisateurs & Groupes → permissions), ou passez l'ID du mode de "
+                "paiement via payment_mode_id (table llx_c_paiement)"
+            ) from error
+        raise
     for payment_type in payment_types:
         if _norm(payment_type.get("code")) == _norm(payment_mode_code):
             return {"id": int(payment_type["id"]), "label": payment_type.get("label", payment_mode_code)}
@@ -465,7 +487,7 @@ class SupplierInvoiceImportWorkflow:
             input.create_missing_supplier and not input.dry_run,
             allow_missing=input.dry_run,
         )
-        payment_mode = await resolve_payment_mode(input.payment_mode_code)
+        payment_mode = await resolve_payment_mode(input.payment_mode_code, input.payment_mode_id)
         bank_account = await resolve_bank_account(input.bank_account_id)
         library = await list_library_pdfs(input.library_name_or_id, input.document_ids)
         library_id = library["library_id"]

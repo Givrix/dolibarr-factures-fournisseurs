@@ -301,6 +301,64 @@ async def test_dry_run_missing_supplier_does_not_fail(monkeypatch: pytest.Monkey
     assert [doc["status"] for doc in result["documents"]] == ["dry_run", "dry_run"]
 
 
+async def test_payment_mode_id_skips_dictionary_lookup(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {
+            "library_name_or_id": "Factures",
+            "supplier_name": "ACME",
+            "payment_mode_id": 3,
+        },
+    )
+
+    assert not dolibarr.calls_to("setupRetrievePaymentTypes")
+    payments = dolibarr.calls_to("supplierinvoicesAddPayment")
+    assert payments[0]["payment_mode_id"] == 3
+    assert result["payment_mode"] == "PRE"
+
+
+async def test_payment_mode_403_gives_clear_error(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+
+    async def fake_call_tool(self, tool_name, arguments=None):
+        if tool_name.endswith("setupRetrievePaymentTypes"):
+            raise ConnectorToolCallError(
+                "dolibarr_anelosimus_c428",
+                response={
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Error calling tool 'setupRetrievePaymentTypes': HTTP error 403: "
+                                "Forbidden - {'error': {'code': 403, 'message': 'Forbidden'}, "
+                                "'debug': {'source': 'api_setup.class.php:290 at call stage'}}"
+                            ),
+                        }
+                    ]
+                },
+            )
+        return dolibarr(tool_name, arguments)
+
+    monkeypatch.setattr(ToolCallClient, "call_tool", fake_call_tool)
+    monkeypatch.setattr(si, "get_mistral_client", lambda **kwargs: client)
+
+    with pytest.raises(WorkflowFailureError) as exc_info:
+        await run_workflow(
+            monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
+        )
+
+    messages = []
+    error = exc_info.value
+    while error is not None:
+        messages.append(str(error))
+        error = error.__cause__
+    assert any("llx_c_paiement" in message for message in messages)
+    assert not dolibarr.calls_to("createSupplierinvoices")
+
+
 async def test_supplier_missing_fails_workflow(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     install_fakes(monkeypatch, dolibarr, client)
