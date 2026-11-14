@@ -212,6 +212,7 @@ def _compute_lines(invoice: ExtractedInvoice) -> list[dict[str, Any]]:
 async def resolve_supplier(
     supplier_name: str,
     create_if_missing: bool,
+    allow_missing: bool = False,
     dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
     candidates = await _call_list(
@@ -227,6 +228,8 @@ async def resolve_supplier(
             return {"id": int(thirdparty["id"]), "name": thirdparty.get("name"), "created": False}
 
     if not create_if_missing:
+        if allow_missing:
+            return {"id": None, "name": supplier_name, "created": False, "found": False}
         raise ValueError(
             f"Fournisseur '{supplier_name}' introuvable dans Dolibarr et création non autorisée"
         )
@@ -458,7 +461,9 @@ class SupplierInvoiceImportWorkflow:
     @workflows.workflow.entrypoint
     async def run(self, input: SupplierInvoiceImportInput) -> ImportResult:
         supplier = await resolve_supplier(
-            input.supplier_name, input.create_missing_supplier and not input.dry_run
+            input.supplier_name,
+            input.create_missing_supplier and not input.dry_run,
+            allow_missing=input.dry_run,
         )
         payment_mode = await resolve_payment_mode(input.payment_mode_code)
         bank_account = await resolve_bank_account(input.bank_account_id)

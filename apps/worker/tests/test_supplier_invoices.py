@@ -286,6 +286,21 @@ async def test_dolibarr_404_empty_list_creates_supplier(monkeypatch: pytest.Monk
     assert dolibarr.calls_to("createThirdparties")
 
 
+async def test_dry_run_missing_supplier_does_not_fail(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {"library_name_or_id": "Factures", "supplier_name": "ACME", "dry_run": True},
+    )
+
+    assert result["supplier_id"] is None
+    assert result["supplier_created"] is False
+    assert not dolibarr.calls_to("createThirdparties")
+    assert [doc["status"] for doc in result["documents"]] == ["dry_run", "dry_run"]
+
+
 async def test_supplier_missing_fails_workflow(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     install_fakes(monkeypatch, dolibarr, client)
