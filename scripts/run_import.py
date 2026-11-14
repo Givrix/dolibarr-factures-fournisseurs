@@ -4,6 +4,7 @@ Usage :
     uv run python scripts/run_import.py --library "Factures fournisseurs" --supplier "ACME" --pdf-dir ./factures
     uv run python scripts/run_import.py --library "Factures fournisseurs" --supplier "ACME" --dry-run
     uv run python scripts/run_import.py --library "lib-abc123" --supplier "ACME" --document-id doc-1 doc-2
+    uv run python scripts/run_import.py --library "Factures fournisseurs" --supplier "ACME" --limit 2 --dry-run
 
 Nécessite MISTRAL_API_KEY (variable d'environnement ou .env à la racine du dépôt)
 et un worker en cours d'exécution (`mistral apps dev`, lancé depuis la racine du dépôt).
@@ -101,6 +102,12 @@ async def main() -> int:
         help="ID Dolibarr du mode de paiement (évite la lecture des dictionnaires, si 403)",
     )
     parser.add_argument("--document-id", nargs="*", default=[], help="IDs de documents à traiter (tous si vide)")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limiter le nombre de PDF traités (pratique pour les tests)",
+    )
     parser.add_argument("--no-create-supplier", action="store_true", help="Ne pas créer le fournisseur absent")
     parser.add_argument("--dry-run", action="store_true", help="Extraction seule, aucune écriture dans Dolibarr")
     parser.add_argument("--deployment", default=None, help="Nom du déploiement (défaut : DEPLOYMENT_NAME du .env)")
@@ -136,6 +143,7 @@ async def main() -> int:
             "payment_mode_id": args.payment_mode_id,
             "create_missing_supplier": not args.no_create_supplier,
             "document_ids": document_ids,
+            "max_documents": args.limit,
             "dry_run": args.dry_run,
         },
         wait_for_result=True,

@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -134,22 +135,16 @@ class FakeLibrariesContainer:
 
 
 class FakeChat:
+    """Imite client.chat.complete_async : renvoie le JSON d'extraction dans message.content."""
+
     def __init__(self, extraction: dict[str, Any]) -> None:
         self.extraction = extraction
+        self.content_override: str | None = None
 
-    async def parse_async(self, response_format, **kwargs):
-        extraction = self.extraction
-
-        class _Message:
-            parsed = response_format.model_validate(extraction)
-
-        class _Choice:
-            message = _Message()
-
-        class _Resp:
-            choices = [_Choice()]
-
-        return _Resp()
+    async def complete_async(self, **kwargs):
+        content = self.content_override or json.dumps(self.extraction, ensure_ascii=False)
+        message = SimpleNamespace(content=content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
 class FakeMistralClient:
@@ -402,6 +397,7 @@ async def test_duplicate_invoice_is_skipped(monkeypatch: pytest.MonkeyPatch):
 async def test_extraction_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     client.chat.extraction = {"is_invoice": True, "invoice_date": None}
+    client.beta.libraries.documents.text_by_document = {"doc-1": "FACTURE sans date", "doc-2": "FACTURE sans date"}
     install_fakes(monkeypatch, dolibarr, client)
 
     result = await run_workflow(
@@ -410,7 +406,61 @@ async def test_extraction_failure_is_recorded_not_raised(monkeypatch: pytest.Mon
 
     assert [doc["status"] for doc in result["documents"]] == ["failed", "failed"]
     assert "Date" in result["documents"][0]["detail"]
+    assert "réponse modèle" in result["documents"][0]["detail"]
     assert not dolibarr.calls_to("createSupplierinvoices")
+
+
+async def test_extract_falls_back_to_date_found_in_ocr(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    client.chat.extraction = {"is_invoice": True, "invoice_date": None, "total_ttc": 23.99}
+    client.beta.libraries.documents.text_by_document = {
+        "doc-1": "OVHcloud\nRéférence de la facture : FR57265489\nDate d'émission : 01/06/2023\nTotal TTC 23,99 €",
+        "doc-2": "OVHcloud\nFacture n°FR57265489 du 01 juin 2023\nTotal TTC 23,99 €",
+    }
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {"library_name_or_id": "Factures", "supplier_name": "ACME", "dry_run": True},
+    )
+
+    assert [doc["status"] for doc in result["documents"]] == ["dry_run", "dry_run"]
+    assert json.loads(result["documents"][0]["detail"])["date"] == "2023-06-01"
+    assert json.loads(result["documents"][1]["detail"])["date"] == "2023-06-01"
+
+
+async def test_extract_parses_json_surrounded_by_prose(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    client.chat.content_override = (
+        'Voici les données : {"is_invoice": true, "invoice_date": "15/07/2025", '
+        '"total_ttc": 12.0} — fin.'
+    )
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {"library_name_or_id": "Factures", "supplier_name": "ACME", "dry_run": True},
+    )
+
+    assert [doc["status"] for doc in result["documents"]] == ["dry_run", "dry_run"]
+    assert json.loads(result["documents"][0]["detail"])["date"] == "2025-07-15"
+
+
+async def test_max_documents_limits_processing(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {
+            "library_name_or_id": "Factures",
+            "supplier_name": "ACME",
+            "max_documents": 1,
+            "dry_run": True,
+        },
+    )
+
+    assert [doc["document"] for doc in result["documents"]] == ["facture-a.pdf"]
 
 
 def test_compute_lines_from_lines():

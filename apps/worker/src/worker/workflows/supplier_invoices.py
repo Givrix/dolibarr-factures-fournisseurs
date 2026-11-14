@@ -109,6 +109,11 @@ class SupplierInvoiceImportInput(pydantic.BaseModel):
         default_factory=list,
         description="Restreindre l'import à ces IDs de documents (tous les PDF si vide)",
     )
+    max_documents: int | None = pydantic.Field(
+        default=None,
+        ge=1,
+        description="Limiter le nombre de PDF traités, dans l'ordre de la bibliothèque (pratique pour les tests)",
+    )
     payment_mode_id: int | None = pydantic.Field(
         default=None,
         description=(
@@ -217,6 +222,48 @@ def _normalize_date(raw: Any) -> str | None:
         if month:
             return f"{int(match.group(3)):04d}-{month:02d}-{int(match.group(1)):02d}"
     return None
+
+
+_TEXT_DATE_PATTERN = (
+    r"\d{1,2}(?:er)?\s+[A-Za-z\u00c0-\u00ff]+\s+\d{4}"
+    r"|\d{1,2}[/.-]\d{1,2}[/.-]\d{4}"
+    r"|\d{4}-\d{1,2}-\d{1,2}"
+)
+_TEXT_DATE_KEYWORD_RE = re.compile(
+    r"(?:date\s+d[\u2019']\u00e9mission|date\s+de\s+facturation|date\s+de\s+facture"
+    r"|facture[^:\n]{0,40}\bdu|date\s*:)\s*:?\s*(" + _TEXT_DATE_PATTERN + ")",
+    re.IGNORECASE,
+)
+_TEXT_DATE_ANY_RE = re.compile(_TEXT_DATE_PATTERN)
+
+
+def _find_date_in_text(text: str) -> str | None:
+    """Recherche déterministe d'une date de facturation dans le texte OCR (secours)."""
+    match = _TEXT_DATE_KEYWORD_RE.search(text)
+    if match:
+        normalized = _normalize_date(match.group(1))
+        if normalized:
+            return normalized
+    for match in _TEXT_DATE_ANY_RE.finditer(text):
+        normalized = _normalize_date(match.group(0))
+        if normalized:
+            return normalized
+    return None
+
+
+def _loads_json_object(content: str | None) -> dict[str, Any]:
+    if not content or not content.strip():
+        raise ValueError("réponse vide du modèle")
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if match is None:
+            raise
+        data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise ValueError(f"JSON inattendu : {type(data).__name__}")
+    return data
 
 
 def _date_to_timestamp(iso_date: str | None) -> int | None:
@@ -427,34 +474,55 @@ async def extract_invoice_data(
     if not text or not str(text).strip():
         return {"status": "failed", "detail": "Document illisible ou vide", "invoice": None}
 
-    response = await client.chat.parse_async(
-        response_format=ExtractedInvoice,
+    response = await client.chat.complete_async(
         model=EXTRACTION_MODEL,
         messages=[
             {
                 "role": "system",
                 "content": (
                     "Tu extrais les données d'une facture fournisseur à partir de son texte "
-                    "(sortie OCR). Réponds uniquement à partir du document. Recopie la date de "
-                    "facturation exactement comme elle est écrite (ex. « 28 Décembre 2016 », "
-                    "« 28/12/2016 ») ; ne la convertis pas. Montants en nombres décimaux, prix "
+                    "(sortie OCR). Réponds uniquement avec un objet JSON contenant exactement "
+                    "les clés : is_invoice (booléen, false si le document n'est pas une facture), "
+                    "invoice_date (la date de la facture, généralement sur la ligne « Date "
+                    "d'émission » ou « Facture n°… du … » ; recopie-la exactement comme elle est "
+                    "écrite, par exemple « 01/06/2023 » ou « 01 juin 2023 » ; jamais null si une "
+                    "date apparaît dans le document), supplier_ref (numéro de la facture chez le "
+                    "fournisseur), lines (liste d'objets {description, quantity, unit_price_ht, "
+                    "unit_price_ttc, vat_rate}), total_ht, total_ttc, currency. Réponds "
+                    "uniquement à partir du document. Montants en nombres décimaux, prix "
                     "unitaires hors taxes quand ils sont disponibles, taux de TVA en pourcentage "
-                    "(20 pour 20 %). is_invoice=false si le document n'est pas une facture."
+                    "(20 pour 20 %)."
                 ),
             },
             {"role": "user", "content": f"Document : {document_name}\n\n{str(text)[:60000]}"},
         ],
+        response_format={"type": "json_object"},
     )
-    invoice = response.choices[0].message.parsed
-    if invoice is None or not invoice.is_invoice:
+    message = response.choices[0].message
+    if isinstance(message.content, str):
+        content = message.content
+    else:
+        content = "".join(
+            chunk.text for chunk in (message.content or []) if hasattr(chunk, "text")
+        )
+    parse_error = None
+    invoice = None
+    try:
+        invoice = ExtractedInvoice.model_validate(_loads_json_object(content))
+    except Exception as error:
+        parse_error = f"{type(error).__name__}: {error}"
+    if invoice is not None and not invoice.is_invoice:
         return {"status": "skipped_not_invoice", "detail": None, "invoice": None}
-    normalized_date = _normalize_date(invoice.invoice_date)
+    normalized_date = _normalize_date(invoice.invoice_date) if invoice else None
     if not normalized_date:
+        normalized_date = _find_date_in_text(str(text))
+    if invoice is None or not normalized_date:
+        snippet = (content or "")[:300]
         return {
             "status": "failed",
             "detail": (
-                f"Date de facturation introuvable ou illisible "
-                f"(OCR : {len(str(text))} caractères, valeur lue : {invoice.invoice_date!r})"
+                f"Date de facturation introuvable (OCR : {len(str(text))} caractères, "
+                f"réponse modèle : {snippet!r}, erreur : {parse_error!r})"
             ),
             "invoice": None,
         }
@@ -587,6 +655,8 @@ class SupplierInvoiceImportWorkflow:
         library = await list_library_pdfs(input.library_name_or_id, input.document_ids)
         library_id = library["library_id"]
         pdfs = library["pdfs"]
+        if input.max_documents is not None:
+            pdfs = pdfs[: input.max_documents]
 
         results: list[DocumentResult] = []
         for pdf in pdfs:

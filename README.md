@@ -93,9 +93,9 @@ bash tools/uv.sh run --all-packages python scripts/run_import.py \
     --library "Factures fournisseurs" --supplier "ACME" \
     --pdf-dir ./factures --dry-run
 
-# 5. Import réel
+# 5. Import réel (--limit pour traiter seulement les N premiers PDF, pratique en test)
 bash tools/uv.sh run --all-packages python scripts/run_import.py \
-    --library "Factures fournisseurs" --supplier "ACME"
+    --library "Factures fournisseurs" --supplier "ACME" --limit 2
 ```
 
 ## Dépannage
