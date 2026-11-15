@@ -146,10 +146,20 @@ async def main() -> int:
             "max_documents": args.limit,
             "dry_run": args.dry_run,
         },
-        wait_for_result=True,
+        wait_for_result=False,
         **kwargs,
     )
-    result = execution.result if hasattr(execution, "result") else execution
+    execution_id = execution.execution_id
+    print(f"Exécution lancée : {execution_id}")
+    print("Attente de la fin du workflow (polling toutes les 5 s)...")
+    try:
+        final = await client.workflows.wait_for_workflow_completion_async(
+            execution_id, polling_interval=5
+        )
+    except RuntimeError:
+        print(f"Le workflow s'est terminé en échec. Logs : exécution {execution_id}")
+        return 1
+    result = final.result
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
     return 0
 

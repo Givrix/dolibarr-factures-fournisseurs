@@ -113,6 +113,11 @@ bash tools/uv.sh run --all-packages python scripts/run_import.py \
 
 ## Dépannage
 
+**Le script affiche une erreur API (599) après ~5 minutes alors que l'import se
+poursuit** : l'attente synchrone du résultat est limitée à 300 s côté API. C'est
+corrigé : `run_import.py` lance l'exécution puis interroge son statut toutes les
+5 s, sans limite de durée.
+
 **Vérifier la connexion Dolibarr** : le script suivant lit la configuration du `.env`
 et effectue des lectures sans écriture (tiers, modes de paiement, comptes bancaires) :
 
