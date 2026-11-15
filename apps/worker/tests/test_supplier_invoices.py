@@ -453,6 +453,25 @@ async def test_extract_falls_back_to_date_found_in_ocr(monkeypatch: pytest.Monke
     assert json.loads(result["documents"][1]["detail"])["date"] == "2023-06-01"
 
 
+async def test_extract_falls_back_to_date_with_short_year_in_ocr(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    client.chat.extraction = {"is_invoice": True, "invoice_date": None, "total_ttc": 23.99}
+    client.beta.libraries.documents.text_by_document = {
+        "doc-1": "OVHcloud\nFacture FR57628354\nEmis le 02/06/23\nTotal TTC 23,99 EUR",
+        "doc-2": "ACME\nFacture A-123\nDate : 15.6.24\nTotal TTC 10,00 EUR",
+    }
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {"library_name_or_id": "Factures", "supplier_name": "ACME", "dry_run": True},
+    )
+
+    assert [doc["status"] for doc in result["documents"]] == ["dry_run", "dry_run"]
+    assert json.loads(result["documents"][0]["detail"])["date"] == "2023-06-02"
+    assert json.loads(result["documents"][1]["detail"])["date"] == "2024-06-15"
+
+
 async def test_extract_parses_json_surrounded_by_prose(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     client.chat.content_override = (

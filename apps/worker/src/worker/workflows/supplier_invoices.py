@@ -168,6 +168,25 @@ _TEXT_DATE_KEYWORD_RE = re.compile(
 _TEXT_DATE_ANY_RE = re.compile(_TEXT_DATE_PATTERN)
 
 
+def _search_dates_in_text(text: str) -> str | None:
+    """Dernier secours : dateparser.search repère les dates dans le texte libre
+    (formats non couverts par les regex, ex. années à deux chiffres)."""
+    from dateparser.search import search_dates
+
+    try:
+        found = search_dates(
+            text[:15000],
+            languages=["fr", "en"],
+            settings={"DATE_ORDER": "DMY", "PREFER_DAY_OF_MONTH": "first"},
+        )
+    except Exception:
+        return None
+    for _, parsed in found or []:
+        if 2000 <= parsed.year <= 2100:
+            return parsed.strftime("%Y-%m-%d")
+    return None
+
+
 def _find_date_in_text(text: str) -> str | None:
     """Recherche déterministe d'une date de facturation dans le texte OCR (secours)."""
     match = _TEXT_DATE_KEYWORD_RE.search(text)
@@ -179,7 +198,7 @@ def _find_date_in_text(text: str) -> str | None:
         normalized = _normalize_date(match.group(0))
         if normalized:
             return normalized
-    return None
+    return _search_dates_in_text(text)
 
 
 def _loads_json_object(content: str | None) -> dict[str, Any]:
