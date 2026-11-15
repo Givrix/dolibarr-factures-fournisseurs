@@ -121,6 +121,13 @@ class DolibarrClient:
     async def add_supplier_invoice_payment(self, invoice_id: int, payload: dict[str, Any]) -> Any:
         return await self.request("POST", f"supplierinvoices/{invoice_id}/payments", json_body=payload)
 
+    async def mark_supplier_invoice_paid(self, invoice_id: int, close_note: str = "") -> Any:
+        return await self.request(
+            "POST",
+            f"supplierinvoices/{invoice_id}/settopaid",
+            json_body={"close_code": "", "close_note": close_note},
+        )
+
     async def delete_supplier_invoice(self, invoice_id: int) -> Any:
         return await self.request("DELETE", f"supplierinvoices/{invoice_id}")
 

@@ -30,6 +30,7 @@ REAL_ACTIVITIES = [
     extract_invoice_data,
     create_supplier_invoice,
     pay_supplier_invoice,
+    si.classify_supplier_invoice_paid,
     si.attach_invoice_pdf,
 ]
 
@@ -102,6 +103,10 @@ class FakeDolibarr:
     async def add_supplier_invoice_payment(self, invoice_id: int, payload: dict[str, Any]) -> Any:
         self._record("supplierinvoicesAddPayment", {"id": invoice_id, **payload})
         return {"id": 1, "amount": 120.0}
+
+    async def mark_supplier_invoice_paid(self, invoice_id: int, close_note: str = "") -> Any:
+        self._record("supplierinvoicesSettopaid", {"id": invoice_id, "close_note": close_note})
+        return {"success": {"code": 200, "message": "Invoice classified as paid"}}
 
     async def delete_supplier_invoice(self, invoice_id: int) -> Any:
         self._record("removeSupplierinvoices", {"id": invoice_id})
@@ -458,7 +463,7 @@ async def test_extract_parses_json_surrounded_by_prose(monkeypatch: pytest.Monke
     assert json.loads(result["documents"][0]["detail"])["date"] == "2025-07-15"
 
 
-async def test_zero_amount_invoice_is_validated_unpaid(monkeypatch: pytest.MonkeyPatch):
+async def test_zero_amount_invoice_is_classified_paid(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     client.chat.extraction = {
         "is_invoice": True,
@@ -475,10 +480,13 @@ async def test_zero_amount_invoice_is_validated_unpaid(monkeypatch: pytest.Monke
         monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
     )
 
-    assert [doc["status"] for doc in result["documents"]] == ["validated_unpaid", "validated_unpaid"]
-    assert [doc["invoice_id"] for doc in result["documents"]] == [101, 102]
+    assert [doc["status"] for doc in result["documents"]] == ["paid", "paid"]
+    assert [doc["amount_paid"] for doc in result["documents"]] == [0.0, 0.0]
     assert "Montant nul" in result["documents"][0]["detail"]
     assert not dolibarr.calls_to("supplierinvoicesAddPayment")
+    settopaid = dolibarr.calls_to("supplierinvoicesSettopaid")
+    assert len(settopaid) == 2
+    assert settopaid[0]["id"] == 101
     assert len(dolibarr.calls_to("uploadSupplierInvoiceDocument")) == 2
 
 

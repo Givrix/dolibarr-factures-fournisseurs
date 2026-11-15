@@ -43,14 +43,14 @@ Pour chaque PDF de la bibliothèque :
 4. **Règlement** : paiement ajouté avec `closepaidinvoices=yes`, à la date de facturation,
    sur le compte bancaire choisi, avec le mode de paiement trouvé dans le dictionnaire
    Dolibarr (code `PRE`, sinon libellé contenant « prélèvement »). Une facture au montant
-   nul n'est pas réglable par Dolibarr (`ErrorTotalIsNull`) : elle est créée et validée,
-   mais laissée impayée (`validated_unpaid`).
+   nul n'est pas réglable par Dolibarr (`ErrorTotalIsNull`) : elle est classée payée
+   via `POST /supplierinvoices/{id}/settopaid`, sans règlement.
 5. **Liaison du PDF** : le PDF source est téléchargé depuis la bibliothèque Mistral
    (URL signée) et attaché à la facture Dolibarr (`POST /documents/upload`,
    `modulepart=supplier_invoice`). Un échec de liaison n'échoue pas le document :
    il est signalé dans le champ `detail`.
 
-Statuts par document : `paid`, `validated_unpaid`, `dry_run`, `skipped_duplicate`,
+Statuts par document : `paid`, `dry_run`, `skipped_duplicate`,
 `skipped_not_invoice`, `failed`.
 
 Pour un premier essai sans risque, lancez le workflow avec `"dry_run": true` : il extrait

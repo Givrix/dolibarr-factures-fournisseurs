@@ -539,6 +539,16 @@ async def create_supplier_invoice(
     }
 
 
+@workflows.activity(name="dolibarr-classify-supplier-invoice-paid")
+async def classify_supplier_invoice_paid(
+    invoice_id: int,
+    comment: str,
+) -> dict[str, Any]:
+    dolibarr = _dolibarr_client()
+    await dolibarr.mark_supplier_invoice_paid(invoice_id, close_note=comment)
+    return {"status": "paid"}
+
+
 @workflows.activity(name="dolibarr-pay-supplier-invoice")
 async def pay_supplier_invoice(
     invoice_id: int,
@@ -708,15 +718,17 @@ async def _process_document(
         total_ttc = float(invoice.get("total_ttc") or 0.0)
         total_ht = float(invoice.get("total_ht") or 0.0)
         if total_ttc == 0.0 and total_ht == 0.0:
+            await classify_supplier_invoice_paid(
+                invoice_id=created_id,
+                comment=f"Montant nul : classement payé sans règlement ({document_name})",
+            )
             result = DocumentResult(
                 document=document_name,
-                status="validated_unpaid",
+                status="paid",
                 invoice_id=created_id,
                 invoice_ref=created_ref,
-                detail=(
-                    "Montant nul : règlement impossible (Dolibarr refuse un paiement "
-                    "de 0), facture créée et validée, laissée impayée"
-                ),
+                amount_paid=0.0,
+                detail="Montant nul : aucun règlement requis, classée payée (settopaid)",
             )
         else:
             paid = await pay_supplier_invoice(
