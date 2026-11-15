@@ -49,6 +49,9 @@ Pour chaque PDF de la bibliothèque :
    (URL signée) et attaché à la facture Dolibarr (`POST /documents/upload`,
    `modulepart=supplier_invoice`). Un échec de liaison n'échoue pas le document :
    il est signalé dans le champ `detail`.
+6. **Nettoyage** : si l'import a réussi (statut `paid`), le PDF est supprimé de la
+   bibliothèque Mistral. Un échec de suppression est signalé dans `detail` sans
+   échouer le document. Les documents en `dry_run` ou en échec sont conservés.
 
 Statuts par document : `paid`, `dry_run`, `skipped_duplicate`,
 `skipped_not_invoice`, `failed`.

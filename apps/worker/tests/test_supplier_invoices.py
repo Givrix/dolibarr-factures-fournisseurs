@@ -32,6 +32,7 @@ REAL_ACTIVITIES = [
     pay_supplier_invoice,
     si.classify_supplier_invoice_paid,
     si.attach_invoice_pdf,
+    si.delete_library_document,
 ]
 
 TASK_QUEUE = "test-task-queue"
@@ -132,6 +133,7 @@ class FakeDocuments:
     def __init__(self, pdfs: list[dict[str, Any]], text_by_document: dict[str, str]) -> None:
         self.pdfs = pdfs
         self.text_by_document = text_by_document
+        self.deleted: list[str] = []
 
     async def list_async(self, library_id: str):
         class _Resp:
@@ -144,6 +146,9 @@ class FakeDocuments:
 
     async def get_signed_url_async(self, library_id: str, document_id: str):
         return f"https://signed.example/{document_id}.pdf"
+
+    async def delete_async(self, library_id: str, document_id: str):
+        self.deleted.append(document_id)
 
 
 class FakeBeta:
@@ -272,6 +277,8 @@ async def test_imports_all_pdfs_and_pays_them(monkeypatch: pytest.MonkeyPatch):
     uploads = dolibarr.calls_to("uploadSupplierInvoiceDocument")
     assert len(uploads) == 2
     assert uploads[0] == {"ref": "FF101", "filename": "facture-a.pdf"}
+
+    assert client.beta.libraries.documents.deleted == ["doc-1", "doc-2"]
 
 
 async def test_existing_supplier_is_reused(monkeypatch: pytest.MonkeyPatch):
@@ -488,6 +495,7 @@ async def test_zero_amount_invoice_is_classified_paid(monkeypatch: pytest.Monkey
     assert len(settopaid) == 2
     assert settopaid[0]["id"] == 101
     assert len(dolibarr.calls_to("uploadSupplierInvoiceDocument")) == 2
+    assert client.beta.libraries.documents.deleted == ["doc-1", "doc-2"]
 
 
 async def test_pdf_attachment_failure_does_not_fail_document(monkeypatch: pytest.MonkeyPatch):

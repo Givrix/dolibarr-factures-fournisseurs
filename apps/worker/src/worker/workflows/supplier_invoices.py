@@ -5,7 +5,8 @@ fournisseurs et un nom de fournisseur. Pour chaque PDF :
   1. extraction des données de la facture (OCR bibliothèque + modèle structuré) ;
   2. création de la facture fournisseur dans Dolibarr (avec anti-doublon) ;
   3. validation de la facture ;
-  4. règlement par prélèvement à la date de facturation, sur le compte bancaire choisi.
+  4. règlement par prélèvement à la date de facturation, sur le compte bancaire choisi ;
+  5. liaison du PDF source à la facture, puis suppression du PDF de la bibliothèque.
 """
 
 import base64
@@ -539,6 +540,18 @@ async def create_supplier_invoice(
     }
 
 
+@workflows.activity(name="library-delete-document")
+async def delete_library_document(
+    library_id: str,
+    document_id: str,
+) -> dict[str, Any]:
+    client = get_mistral_client(run_as=RunAs.AUTO)
+    await client.beta.libraries.documents.delete_async(
+        library_id=library_id, document_id=document_id
+    )
+    return {"status": "deleted"}
+
+
 @workflows.activity(name="dolibarr-classify-supplier-invoice-paid")
 async def classify_supplier_invoice_paid(
     invoice_id: int,
@@ -756,6 +769,13 @@ async def _process_document(
                 )
             except Exception as error:
                 note = f"Liaison du PDF impossible : {_error_text(error)}"
+                result.detail = f"{result.detail} | {note}" if result.detail else note
+
+        if result.status == "paid":
+            try:
+                await delete_library_document(library_id=library_id, document_id=document_id)
+            except Exception as error:
+                note = f"Suppression du PDF de la bibliothèque impossible : {_error_text(error)}"
                 result.detail = f"{result.detail} | {note}" if result.detail else note
         return result
     except Exception as error:
