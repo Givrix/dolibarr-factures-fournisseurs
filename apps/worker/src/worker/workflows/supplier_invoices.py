@@ -16,29 +16,11 @@ from typing import Any
 
 import mistralai.workflows as workflows
 import pydantic
-from mistralai.workflows import Depends
 from mistralai.workflows.client import get_mistral_client
 from mistralai.workflows.core.auth.run_as import RunAs
-from mistralai.workflows.plugins.mistralai.connectors import (
-    ToolCallClient,
-    connector,
-    uses_connectors,
-)
-from mistralai.workflows.plugins.mistralai.connectors.exceptions import ConnectorToolCallError
 
-DOLIBARR_CONNECTOR_NAME = "dolibarr_anelosimus_c428"
-dolibarr_connector = connector(DOLIBARR_CONNECTOR_NAME)
-
-TOOL_LIST_THIRDPARTIES = "listThirdparties"
-TOOL_CREATE_THIRDPARTIES = "createThirdparties"
-TOOL_LIST_SUPPLIER_INVOICES = "listSupplierinvoices"
-TOOL_CREATE_SUPPLIER_INVOICES = "createSupplierinvoices"
-TOOL_CREATE_SUPPLIER_INVOICE_LINE = "supplierinvoicesCreateLine"
-TOOL_VALIDATE_SUPPLIER_INVOICE = "supplierinvoicesValidate"
-TOOL_ADD_SUPPLIER_INVOICE_PAYMENT = "supplierinvoicesAddPayment"
-TOOL_REMOVE_SUPPLIER_INVOICE = "removeSupplierinvoices"
-TOOL_LIST_PAYMENT_TYPES = "setupRetrievePaymentTypes"
-TOOL_LIST_BANK_ACCOUNTS = "listBankaccounts"
+with workflows.workflow.unsafe.imports_passed_through():
+    from worker.dolibarr import DolibarrClient, DolibarrError
 
 EXTRACTION_MODEL = "mistral-medium-latest"
 DEFAULT_VAT_RATE = 20.0
@@ -127,44 +109,22 @@ class SupplierInvoiceImportInput(pydantic.BaseModel):
     )
 
 
-def _unwrap_tool_result(raw: Any) -> Any:
-    """Normalise la réponse d'un outil connecteur en données Python."""
-    if raw is None:
+def _dolibarr_client() -> DolibarrClient:
+    """Construit le client REST Dolibarr à partir de l'environnement du worker."""
+    return DolibarrClient()
+
+
+def _created_id(created: Any) -> int | None:
+    """Extrait l'ID d'une création Dolibarr (l'API renvoie un entier ou un objet)."""
+    if isinstance(created, bool):
         return None
-    if isinstance(raw, (list, int, float, bool)):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return raw
-        if isinstance(parsed, str):
-            return parsed if parsed == raw else _unwrap_tool_result(parsed)
-        return _unwrap_tool_result(parsed)
-    if isinstance(raw, dict):
-        content = raw.get("content")
-        if isinstance(content, list) and content:
-            texts = []
-            for item in content:
-                if isinstance(item, dict) and isinstance(item.get("text"), str):
-                    texts.append(item["text"])
-                else:
-                    return raw
-            if len(texts) == 1:
-                return _unwrap_tool_result(texts[0])
-            return [_unwrap_tool_result(t) for t in texts]
-        if set(raw.keys()) == {"result"}:
-            return _unwrap_tool_result(raw["result"])
-        return raw
-    return raw
-
-
-def _data_list(data: Any) -> list[dict[str, Any]]:
-    if isinstance(data, dict):
-        data = data.get("data", data)
-    if isinstance(data, list):
-        return [item for item in data if isinstance(item, dict)]
-    return []
+    if isinstance(created, int):
+        return created
+    if isinstance(created, str) and created.strip().isdigit():
+        return int(created.strip())
+    if isinstance(created, dict) and created.get("id") is not None:
+        return int(created["id"])
+    return None
 
 
 def _norm(value: Any) -> str:
@@ -275,32 +235,6 @@ def _date_to_timestamp(iso_date: str | None) -> int | None:
         return None
 
 
-_EMPTY_LIST_ERROR = re.compile(r"HTTP error 404.*[Nn]o .+ found", re.DOTALL)
-_FORBIDDEN_ERROR = re.compile(r"HTTP error 403", re.DOTALL)
-_MANGLED_BODY_ERROR = re.compile(r"field missing|[Ii]nvalid params|request_data", re.DOTALL)
-
-
-def _create_arg_candidates(payload: dict[str, Any], base: dict[str, Any]) -> list[dict[str, Any]]:
-    """Formats d'arguments essayés en cascade pour transmettre le corps JSON à Dolibarr.
-
-    Le schéma MCP exposé par le connecteur déclare ``request_data`` comme tableau
-    de chaînes, alors que l'API Restler attend un objet JSON en corps de requête ;
-    selon la façon dont la passerelle transmet les arguments, un seul de ces
-    formats arrive intact. Le premier qui produit un corps exploitable gagne ;
-    les suivants ne sont essayés que si Dolibarr signale un corps déformé.
-    """
-    serialized = json.dumps(payload)
-    return [
-        {"request_data": payload, **base},
-        {"body": payload, **base},
-        {**payload, **base},
-        {"request_data": [serialized], **base},
-        {"body": [serialized], **base},
-        {"request_data": serialized, **base},
-        {"body": serialized, **base},
-    ]
-
-
 def _error_text(error: BaseException) -> str:
     """Détaille une exception (chaîne de causes incluse) pour le rapport par document."""
     parts: list[str] = []
@@ -309,60 +243,8 @@ def _error_text(error: BaseException) -> str:
         text = str(current)
         if text and text not in parts:
             parts.append(text)
-        details = getattr(current, "details", None)
-        if details:
-            try:
-                parts.append(json.dumps(details, default=str, ensure_ascii=False))
-            except (TypeError, ValueError):
-                parts.append(str(details))
         current = current.__cause__
     return " | ".join(parts) or type(error).__name__
-
-
-async def _call_create(
-    dolibarr: ToolCallClient,
-    tool: str,
-    payload: dict[str, Any],
-    extra: dict[str, Any] | None = None,
-) -> Any:
-    """Appel d'un outil de création Dolibarr.
-
-    Essaie chaque format d'arguments de :func:`_create_arg_candidates` jusqu'à
-    ce que Dolibarr accepte le corps de la requête ; une erreur qui ne ressemble
-    pas à un corps déformé (ex. tiers introuvable, droits manquants) interrompt
-    la cascade immédiatement.
-    """
-    base = dict(extra or {})
-    attempts = _create_arg_candidates(payload, base)
-    errors: list[str] = []
-    for arguments in attempts:
-        try:
-            return await dolibarr.call_tool(tool, {**arguments})
-        except ConnectorToolCallError as error:
-            text = json.dumps(error.details[0] if error.details else "", default=str)
-            errors.append(text)
-            if not _MANGLED_BODY_ERROR.search(text):
-                raise
-    raise ValueError(
-        f"Appel '{tool}' refusé pour les {len(attempts)} formats de request_data : "
-        + " || ".join(errors)
-    )
-
-
-async def _call_list(
-    dolibarr: ToolCallClient,
-    tool: str,
-    arguments: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Appel de liste Dolibarr ; l'API renvoie 404 « No ... found » quand la liste est vide."""
-    try:
-        raw = await dolibarr.call_tool(tool, arguments)
-    except ConnectorToolCallError as error:
-        text = json.dumps(error.details[0] if error.details else "", default=str)
-        if _EMPTY_LIST_ERROR.search(text):
-            return []
-        raise
-    return _data_list(_unwrap_tool_result(raw))
 
 
 def _compute_lines(invoice: ExtractedInvoice) -> list[dict[str, Any]]:
@@ -411,15 +293,11 @@ async def resolve_supplier(
     supplier_name: str,
     create_if_missing: bool,
     allow_missing: bool = False,
-    dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
-    candidates = await _call_list(
-        dolibarr,
-        TOOL_LIST_THIRDPARTIES,
-        {
-            "sqlfilters": f"((t.nom:like:'{supplier_name}%') or (t.name_alias:like:'{supplier_name}%'))",
-            "limit": 100,
-        },
+    dolibarr = _dolibarr_client()
+    candidates = await dolibarr.list_thirdparties(
+        sqlfilters=f"((t.nom:like:'{supplier_name}%') or (t.name_alias:like:'{supplier_name}%'))",
+        limit=100,
     )
     for thirdparty in candidates:
         if _norm(thirdparty.get("name") or thirdparty.get("nom")) == _norm(supplier_name):
@@ -432,30 +310,25 @@ async def resolve_supplier(
             f"Fournisseur '{supplier_name}' introuvable dans Dolibarr et création non autorisée"
         )
 
-    raw = await _call_create(
-        dolibarr,
-        TOOL_CREATE_THIRDPARTIES,
-        {"name": supplier_name, "fournisseur": 1},
-    )
-    created = _unwrap_tool_result(raw)
-    if not isinstance(created, dict) or "id" not in created:
+    created = await dolibarr.create_thirdparty({"name": supplier_name, "fournisseur": 1})
+    created_id = _created_id(created)
+    if created_id is None:
         raise ValueError(f"Création du fournisseur '{supplier_name}' impossible : {created!r}")
-    return {"id": int(created["id"]), "name": created.get("name", supplier_name), "created": True}
+    return {"id": created_id, "name": supplier_name, "created": True}
 
 
 @workflows.activity(name="dolibarr-resolve-payment-mode")
 async def resolve_payment_mode(
     payment_mode_code: str,
     payment_mode_id: int | None = None,
-    dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
     if payment_mode_id is not None:
         return {"id": payment_mode_id, "label": payment_mode_code}
+    dolibarr = _dolibarr_client()
     try:
-        payment_types = await _call_list(dolibarr, TOOL_LIST_PAYMENT_TYPES, {"limit": 200})
-    except ConnectorToolCallError as error:
-        text = json.dumps(error.details[0] if error.details else "", default=str)
-        if _FORBIDDEN_ERROR.search(text):
+        payment_types = await dolibarr.list_payment_types()
+    except DolibarrError as error:
+        if error.status_code == 403:
             raise ValueError(
                 "L'utilisateur API Dolibarr n'a pas le droit de lire les dictionnaires "
                 "(setup) : accordez-lui la lecture des factures, propales ou commandes dans "
@@ -484,9 +357,9 @@ async def resolve_payment_mode(
 @workflows.activity(name="dolibarr-resolve-bank-account")
 async def resolve_bank_account(
     bank_account_id: int,
-    dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
-    accounts = await _call_list(dolibarr, TOOL_LIST_BANK_ACCOUNTS, {"limit": 200})
+    dolibarr = _dolibarr_client()
+    accounts = await dolibarr.list_bank_accounts()
     for account in accounts:
         if int(account.get("id", -1)) == bank_account_id:
             return {"id": bank_account_id, "label": account.get("label", str(bank_account_id))}
@@ -609,20 +482,16 @@ async def create_supplier_invoice(
     supplier_name: str,
     invoice: dict[str, Any],
     document_name: str,
-    dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
+    dolibarr = _dolibarr_client()
     extracted = ExtractedInvoice.model_validate(invoice)
     supplier_ref = (extracted.supplier_ref or "").strip()
 
     if supplier_ref:
-        existing = await _call_list(
-            dolibarr,
-            TOOL_LIST_SUPPLIER_INVOICES,
-            {
-                "thirdparty_ids": str(supplier_id),
-                "sqlfilters": f"(t.ref_supplier:=:'{supplier_ref}')",
-                "limit": 10,
-            },
+        existing = await dolibarr.list_supplier_invoices(
+            thirdparty_ids=str(supplier_id),
+            sqlfilters=f"(t.ref_supplier:=:'{supplier_ref}')",
+            limit=10,
         )
         if existing:
             return {
@@ -643,29 +512,24 @@ async def create_supplier_invoice(
     if supplier_ref:
         payload["ref_supplier"] = supplier_ref
 
-    raw = await _call_create(dolibarr, TOOL_CREATE_SUPPLIER_INVOICES, payload)
-    created = _unwrap_tool_result(raw)
-    if not isinstance(created, dict) or "id" not in created:
+    created = await dolibarr.create_supplier_invoice(payload)
+    invoice_id = _created_id(created)
+    if invoice_id is None:
         raise ValueError(f"Création de la facture impossible : {created!r}")
-    invoice_id = int(created["id"])
+    invoice_ref = created.get("ref") if isinstance(created, dict) else None
 
     try:
         for line in _compute_lines(extracted):
-            await _call_create(
-                dolibarr,
-                TOOL_CREATE_SUPPLIER_INVOICE_LINE,
-                line,
-                extra={"id": invoice_id},
-            )
-        await dolibarr.call_tool(TOOL_VALIDATE_SUPPLIER_INVOICE, {"id": invoice_id})
+            await dolibarr.add_supplier_invoice_line(invoice_id, line)
+        await dolibarr.validate_supplier_invoice(invoice_id)
     except Exception:
-        await dolibarr.call_tool(TOOL_REMOVE_SUPPLIER_INVOICE, {"id": invoice_id})
+        await dolibarr.delete_supplier_invoice(invoice_id)
         raise
 
     return {
         "status": "created",
         "invoice_id": invoice_id,
-        "invoice_ref": created.get("ref"),
+        "invoice_ref": invoice_ref,
         "detail": None,
     }
 
@@ -677,13 +541,12 @@ async def pay_supplier_invoice(
     payment_mode_id: int,
     bank_account_id: int,
     comment: str,
-    dolibarr: ToolCallClient = Depends(dolibarr_connector),
 ) -> dict[str, Any]:
+    dolibarr = _dolibarr_client()
     payment_timestamp = _date_to_timestamp(payment_date)
-    raw = await dolibarr.call_tool(
-        TOOL_ADD_SUPPLIER_INVOICE_PAYMENT,
+    payment = await dolibarr.add_supplier_invoice_payment(
+        invoice_id,
         {
-            "id": invoice_id,
             "datepaye": payment_timestamp or payment_date,
             "payment_mode_id": payment_mode_id,
             "closepaidinvoices": "yes",
@@ -691,7 +554,6 @@ async def pay_supplier_invoice(
             "comment": comment,
         },
     )
-    payment = _unwrap_tool_result(raw)
     amount = None
     if isinstance(payment, dict):
         for key in ("amount", "montant", "total"):
@@ -711,7 +573,6 @@ async def pay_supplier_invoice(
     ),
     on_behalf_of=True,
 )
-@uses_connectors(dolibarr_connector)
 class SupplierInvoiceImportWorkflow:
     @workflows.workflow.entrypoint
     async def run(self, input: SupplierInvoiceImportInput) -> ImportResult:

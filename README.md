@@ -28,6 +28,8 @@ Entrée du workflow `dolibarr-supplier-invoices-import` :
 | `payment_mode_code` | `PRE` | Mode de paiement Dolibarr (prélèvement) |
 | `create_missing_supplier` | `true` | Crée le tiers fournisseur s'il n'existe pas |
 | `document_ids` | `[]` | Restreint l'import à certains documents (tous les PDF si vide) |
+| `max_documents` | `null` | Limite le nombre de PDF traités, dans l'ordre de la bibliothèque |
+| `payment_mode_id` | `null` | ID Dolibarr du mode de paiement (évite la lecture des dictionnaires) |
 | `dry_run` | `false` | Si vrai : extraction seule, aucune écriture dans Dolibarr |
 
 Pour chaque PDF de la bibliothèque :
@@ -52,9 +54,13 @@ les données de chaque PDF et retourne ce qui serait créé, sans rien écrire d
 1. **Bibliothèque Mistral** : créez une bibliothèque dans Mistral Studio et téléversez-y
    les PDF de factures. Partagez-la avec le workspace si le workflow tourne sans identité
    utilisateur (schedule/webhook).
-2. **Connecteur Dolibarr** : le connecteur `dolibarr_anelosimus_c428` doit avoir des
-   identifiants valides (portée utilisateur : le workflow tourne `on_behalf_of`, avec
-   l'identité de l'utilisateur qui le lance).
+2. **API Dolibarr** : le worker appelle l'API REST de Dolibarr directement (le
+   connecteur MCP généré depuis le swagger Restler déforme les corps POST et est
+   donc abandonné). Renseignez dans l'environnement du worker :
+   - `DOLIBARR_BASE_URL` : URL de l'API, ex. `https://dolibarr.anelosimus.info/htdocs/api/index.php` ;
+   - `DOLIBARR_API_TOKEN` : clé API de l'utilisateur Dolibarr (envoyée en header `DOLAPIKEY`).
+   L'utilisateur API doit avoir les droits sur les tiers, les factures fournisseurs,
+   les banques et la lecture des dictionnaires (setup).
 3. **Dolibarr** : le dictionnaire des modes de paiement doit contenir le prélèvement
    (code `PRE`) et le compte bancaire `1` doit exister.
 
@@ -75,7 +81,7 @@ et `package.json`), pas depuis `apps/`.
 
 ```bash
 # 1. Clé API + nom de déploiement
-cp .env.example .env            # puis renseignez MISTRAL_API_KEY
+cp .env.example .env            # puis renseignez MISTRAL_API_KEY, DOLIBARR_BASE_URL et DOLIBARR_API_TOKEN
 # DEPLOYMENT_NAME (prérempli : dolibarr-factures-fournisseurs-dev) est requis :
 # il nomme le déploiement du worker et la file de tâche ; le worker s'y
 # enregistre et les exécutions y sont routées. Gardez la même valeur partout.
@@ -100,8 +106,15 @@ bash tools/uv.sh run --all-packages python scripts/run_import.py \
 
 ## Dépannage
 
+**Vérifier la connexion Dolibarr** : le script suivant lit la configuration du `.env`
+et effectue des lectures sans écriture (tiers, modes de paiement, comptes bancaires) :
+
+```bash
+bash tools/uv.sh run --all-packages python scripts/check_dolibarr.py
+```
+
 **Erreur 403 sur les modes de paiement** : la lecture des dictionnaires Dolibarr
-(`setupRetrievePaymentTypes`) exige que l'utilisateur API ait un droit de lecture
+(`GET /setup/payment-types`) exige que l'utilisateur API ait un droit de lecture
 factures, propales ou commandes clients (source Dolibarr 24.0, `api_setup.class.php`).
 Deux options :
 
@@ -112,4 +125,5 @@ Deux options :
 ## Déploiement
 
 Le déploiement géré se fait depuis un dépôt GitHub (`deploy/docker/Dockerfile.worker`).
-Nom de déploiement conseillé : `dolibarr-factures-fournisseurs-worker`.
+Nom de déploiement conseillé : `dolibarr-factures-fournisseurs-worker`. Pensez à définir
+`DOLIBARR_BASE_URL` et `DOLIBARR_API_TOKEN` dans les settings de l'app déployée.
