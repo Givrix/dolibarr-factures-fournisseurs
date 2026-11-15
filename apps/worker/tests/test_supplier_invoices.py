@@ -273,7 +273,7 @@ async def test_dolibarr_404_empty_list_creates_supplier(monkeypatch: pytest.Monk
             return httpx.Response(404, json={"error": {"code": 404, "message": "Not Found: No third parties found"}})
         if request.url.path.endswith("/thirdparties") and request.method == "POST":
             return httpx.Response(200, json=7)
-        if request.url.path.endswith("/dictionary/payment_types"):
+        if request.url.path.endswith("/setup/dictionary/payment_types"):
             return httpx.Response(200, json=[{"id": 3, "code": "PRE", "label": "Pr\u00e9l\u00e8vement"}])
         if request.url.path.endswith("/bankaccounts"):
             return httpx.Response(200, json=[{"id": 1, "label": "Compte courant"}])
