@@ -72,7 +72,7 @@ class DolibarrClient:
         return await self.request("POST", "thirdparties", json_body=payload)
 
     async def list_payment_types(self, limit: int = 200) -> list[dict[str, Any]]:
-        return await self._list("setup/payment-types", {"limit": limit})
+        return await self._list("dictionary/payment_types", {"limit": limit})
 
     async def list_bank_accounts(self, limit: int = 200) -> list[dict[str, Any]]:
         return await self._list("bankaccounts", {"limit": limit})

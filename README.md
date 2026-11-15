@@ -114,7 +114,7 @@ bash tools/uv.sh run --all-packages python scripts/check_dolibarr.py
 ```
 
 **Erreur 403 sur les modes de paiement** : la lecture des dictionnaires Dolibarr
-(`GET /setup/payment-types`) exige que l'utilisateur API ait un droit de lecture
+(`GET /dictionary/payment_types`) exige que l'utilisateur API ait un droit de lecture
 factures, propales ou commandes clients (source Dolibarr 24.0, `api_setup.class.php`).
 Deux options :
 
