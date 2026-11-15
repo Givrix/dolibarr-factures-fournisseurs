@@ -91,6 +91,23 @@ class DolibarrClient:
     async def create_supplier_invoice(self, payload: dict[str, Any]) -> Any:
         return await self.request("POST", "supplierinvoices", json_body=payload)
 
+    async def get_supplier_invoice(self, invoice_id: int) -> dict[str, Any]:
+        return await self.request("GET", f"supplierinvoices/{invoice_id}")
+
+    async def upload_supplier_invoice_document(self, ref: str, filename: str, content_base64: str) -> Any:
+        return await self.request(
+            "POST",
+            "documents/upload",
+            json_body={
+                "filename": filename,
+                "modulepart": "supplier_invoice",
+                "ref": ref,
+                "filecontent": content_base64,
+                "fileencoding": "base64",
+                "overwriteifexists": 1,
+            },
+        )
+
     async def add_supplier_invoice_line(self, invoice_id: int, line: dict[str, Any]) -> Any:
         return await self.request("POST", f"supplierinvoices/{invoice_id}/lines", json_body=line)
 

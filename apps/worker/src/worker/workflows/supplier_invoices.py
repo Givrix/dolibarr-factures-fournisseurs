@@ -8,6 +8,7 @@ fournisseurs et un nom de fournisseur. Pour chaque PDF :
   4. règlement par prélèvement à la date de facturation, sur le compte bancaire choisi.
 """
 
+import base64
 import json
 import re
 import unicodedata
@@ -526,6 +527,10 @@ async def create_supplier_invoice(
         await dolibarr.delete_supplier_invoice(invoice_id)
         raise
 
+    fetched = await dolibarr.get_supplier_invoice(invoice_id)
+    if isinstance(fetched, dict) and fetched.get("ref"):
+        invoice_ref = fetched["ref"]
+
     return {
         "status": "created",
         "invoice_id": invoice_id,
@@ -561,6 +566,36 @@ async def pay_supplier_invoice(
                 amount = float(payment[key])
                 break
     return {"status": "paid", "amount_paid": amount, "detail": None}
+
+
+async def _fetch_pdf(url: str) -> bytes:
+    import httpx
+
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.content
+
+
+@workflows.activity(name="dolibarr-attach-invoice-pdf")
+async def attach_invoice_pdf(
+    library_id: str,
+    document_id: str,
+    document_name: str,
+    invoice_ref: str,
+) -> dict[str, Any]:
+    client = get_mistral_client(run_as=RunAs.AUTO)
+    signed_url = await client.beta.libraries.documents.get_signed_url_async(
+        library_id=library_id, document_id=document_id
+    )
+    content = await _fetch_pdf(signed_url)
+    dolibarr = _dolibarr_client()
+    await dolibarr.upload_supplier_invoice_document(
+        ref=invoice_ref,
+        filename=document_name,
+        content_base64=base64.b64encode(content).decode("ascii"),
+    )
+    return {"status": "attached"}
 
 
 @workflows.workflow.define(
@@ -624,6 +659,8 @@ async def _process_document(
 ) -> DocumentResult:
     document_id = document["id"]
     document_name = document["name"]
+    created_id: int | None = None
+    created_ref: str | None = None
     try:
         extracted = await extract_invoice_data(library_id, document_id, document_name)
         if extracted["status"] != "ok":
@@ -665,20 +702,55 @@ async def _process_document(
                 invoice_ref=created.get("invoice_ref"),
                 detail=created.get("detail"),
             )
+        created_id = created["invoice_id"]
+        created_ref = created.get("invoice_ref")
 
-        paid = await pay_supplier_invoice(
-            invoice_id=created["invoice_id"],
-            payment_date=invoice["invoice_date"],
-            payment_mode_id=payment_mode_id,
-            bank_account_id=bank_account_id,
-            comment=f"Prélèvement automatique - facture {created.get('invoice_ref') or document_name}",
-        )
+        total_ttc = float(invoice.get("total_ttc") or 0.0)
+        total_ht = float(invoice.get("total_ht") or 0.0)
+        if total_ttc == 0.0 and total_ht == 0.0:
+            result = DocumentResult(
+                document=document_name,
+                status="validated_unpaid",
+                invoice_id=created_id,
+                invoice_ref=created_ref,
+                detail=(
+                    "Montant nul : règlement impossible (Dolibarr refuse un paiement "
+                    "de 0), facture créée et validée, laissée impayée"
+                ),
+            )
+        else:
+            paid = await pay_supplier_invoice(
+                invoice_id=created_id,
+                payment_date=invoice["invoice_date"],
+                payment_mode_id=payment_mode_id,
+                bank_account_id=bank_account_id,
+                comment=f"Prélèvement automatique - facture {created_ref or document_name}",
+            )
+            result = DocumentResult(
+                document=document_name,
+                status="paid",
+                invoice_id=created_id,
+                invoice_ref=created_ref,
+                amount_paid=paid.get("amount_paid") or total_ttc or None,
+            )
+
+        if created_ref:
+            try:
+                await attach_invoice_pdf(
+                    library_id=library_id,
+                    document_id=document_id,
+                    document_name=document_name,
+                    invoice_ref=created_ref,
+                )
+            except Exception as error:
+                note = f"Liaison du PDF impossible : {_error_text(error)}"
+                result.detail = f"{result.detail} | {note}" if result.detail else note
+        return result
+    except Exception as error:
         return DocumentResult(
             document=document_name,
-            status="paid",
-            invoice_id=created["invoice_id"],
-            invoice_ref=created.get("invoice_ref"),
-            amount_paid=paid.get("amount_paid"),
+            status="failed",
+            invoice_id=created_id,
+            invoice_ref=created_ref,
+            detail=_error_text(error),
         )
-    except Exception as error:
-        return DocumentResult(document=document_name, status="failed", detail=_error_text(error))

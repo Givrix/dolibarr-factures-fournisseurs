@@ -30,6 +30,7 @@ REAL_ACTIVITIES = [
     extract_invoice_data,
     create_supplier_invoice,
     pay_supplier_invoice,
+    si.attach_invoice_pdf,
 ]
 
 TASK_QUEUE = "test-task-queue"
@@ -82,6 +83,14 @@ class FakeDolibarr:
         self.next_invoice_id += 1
         return invoice
 
+    async def get_supplier_invoice(self, invoice_id: int) -> dict[str, Any]:
+        self._record("getSupplierinvoices", {"id": invoice_id})
+        return {"id": invoice_id, "ref": f"FF{invoice_id}"}
+
+    async def upload_supplier_invoice_document(self, ref: str, filename: str, content_base64: str) -> Any:
+        self._record("uploadSupplierInvoiceDocument", {"ref": ref, "filename": filename})
+        return {"success": True}
+
     async def add_supplier_invoice_line(self, invoice_id: int, line: dict[str, Any]) -> Any:
         self._record("supplierinvoicesCreateLine", {"id": invoice_id, **line})
         return 1
@@ -128,6 +137,9 @@ class FakeDocuments:
     async def text_content_async(self, library_id: str, document_id: str):
         return self.text_by_document[document_id]
 
+    async def get_signed_url_async(self, library_id: str, document_id: str):
+        return f"https://signed.example/{document_id}.pdf"
+
 
 class FakeBeta:
     def __init__(self, documents: FakeDocuments) -> None:
@@ -171,6 +183,11 @@ def install_fakes(
 ) -> None:
     monkeypatch.setattr(si, "_dolibarr_client", lambda: dolibarr)
     monkeypatch.setattr(si, "get_mistral_client", lambda **kwargs: client)
+
+    async def fake_fetch_pdf(url: str) -> bytes:
+        return b"%PDF-fake"
+
+    monkeypatch.setattr(si, "_fetch_pdf", fake_fetch_pdf)
 
 
 def base_fixtures() -> tuple[FakeDolibarr, FakeMistralClient]:
@@ -221,6 +238,8 @@ async def test_imports_all_pdfs_and_pays_them(monkeypatch: pytest.MonkeyPatch):
     assert result["payment_mode"] == "Prélèvement"
     assert [doc["status"] for doc in result["documents"]] == ["paid", "paid"]
     assert [doc["invoice_id"] for doc in result["documents"]] == [101, 102]
+    assert [doc["invoice_ref"] for doc in result["documents"]] == ["FF101", "FF102"]
+    assert [doc["amount_paid"] for doc in result["documents"]] == [120.0, 120.0]
 
     payments = dolibarr.calls_to("supplierinvoicesAddPayment")
     assert len(payments) == 2
@@ -244,6 +263,10 @@ async def test_imports_all_pdfs_and_pays_them(monkeypatch: pytest.MonkeyPatch):
         "tva_tx": 20.0,
     }
     assert dolibarr.calls_to("supplierinvoicesValidate")
+
+    uploads = dolibarr.calls_to("uploadSupplierInvoiceDocument")
+    assert len(uploads) == 2
+    assert uploads[0] == {"ref": "FF101", "filename": "facture-a.pdf"}
 
 
 async def test_existing_supplier_is_reused(monkeypatch: pytest.MonkeyPatch):
@@ -433,6 +456,48 @@ async def test_extract_parses_json_surrounded_by_prose(monkeypatch: pytest.Monke
 
     assert [doc["status"] for doc in result["documents"]] == ["dry_run", "dry_run"]
     assert json.loads(result["documents"][0]["detail"])["date"] == "2025-07-15"
+
+
+async def test_zero_amount_invoice_is_validated_unpaid(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    client.chat.extraction = {
+        "is_invoice": True,
+        "invoice_date": "2025-06-15",
+        "supplier_ref": "FA-ZERO",
+        "lines": [{"description": "Avoir", "quantity": 1.0, "unit_price_ht": 0.0, "vat_rate": 20.0}],
+        "total_ht": 0.0,
+        "total_ttc": 0.0,
+        "currency": "EUR",
+    }
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
+    )
+
+    assert [doc["status"] for doc in result["documents"]] == ["validated_unpaid", "validated_unpaid"]
+    assert [doc["invoice_id"] for doc in result["documents"]] == [101, 102]
+    assert "Montant nul" in result["documents"][0]["detail"]
+    assert not dolibarr.calls_to("supplierinvoicesAddPayment")
+    assert len(dolibarr.calls_to("uploadSupplierInvoiceDocument")) == 2
+
+
+async def test_pdf_attachment_failure_does_not_fail_document(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    install_fakes(monkeypatch, dolibarr, client)
+
+    async def failing_upload(self, ref: str, filename: str, content_base64: str) -> Any:
+        dolibarr._record("uploadSupplierInvoiceDocument", {"ref": ref, "filename": filename})
+        raise DolibarrError(500, "upload error")
+
+    monkeypatch.setattr(FakeDolibarr, "upload_supplier_invoice_document", failing_upload)
+
+    result = await run_workflow(
+        monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
+    )
+
+    assert [doc["status"] for doc in result["documents"]] == ["paid", "paid"]
+    assert "Liaison du PDF impossible" in result["documents"][0]["detail"]
 
 
 async def test_max_documents_limits_processing(monkeypatch: pytest.MonkeyPatch):
