@@ -12,7 +12,6 @@ fournisseurs et un nom de fournisseur. Pour chaque PDF :
 import base64
 import json
 import re
-import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,6 +21,8 @@ from mistralai.workflows.client import get_mistral_client
 from mistralai.workflows.core.auth.run_as import RunAs
 
 with workflows.workflow.unsafe.imports_passed_through():
+    import dateparser
+
     from worker.dolibarr import DolibarrClient, DolibarrError
 
 EXTRACTION_MODEL = "mistral-medium-latest"
@@ -133,57 +134,25 @@ def _norm(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-_MONTHS = {
-    "janvier": 1,
-    "fevrier": 2,
-    "mars": 3,
-    "avril": 4,
-    "mai": 5,
-    "juin": 6,
-    "juillet": 7,
-    "aout": 8,
-    "septembre": 9,
-    "octobre": 10,
-    "novembre": 11,
-    "decembre": 12,
-    "january": 1,
-    "february": 2,
-    "march": 3,
-    "april": 4,
-    "june": 6,
-    "july": 7,
-    "august": 8,
-    "september": 9,
-    "october": 10,
-    "november": 11,
-    "december": 12,
-}
-
-
-def _strip_accents(value: str) -> str:
-    return "".join(c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c))
-
-
 def _normalize_date(raw: Any) -> str | None:
-    """Normalise une date telle qu'écrite sur une facture en YYYY-MM-DD."""
+    """Normalise une date telle qu'écrite sur une facture en YYYY-MM-DD.
+
+    Utilise dateparser (français et anglais, jour en premier) : gère « 28/12/2016 »,
+    « 28.12.2016 », « 28 Décembre 2016 », « 1er Mars 2025 », « 28 December 2016 ».
+    """
     if raw is None:
         return None
     value = str(raw).strip()
-    match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", value)
-    if match:
-        year, month, day = (int(part) for part in match.groups())
-        return f"{year:04d}-{month:02d}-{day:02d}"
-    match = re.fullmatch(r"(\d{1,2})[/..-](\d{1,2})[/..-](\d{4})", value)
-    if match:
-        day, month, year = (int(part) for part in match.groups())
-        if 1 <= month <= 12 and 1 <= day <= 31:
-            return f"{year:04d}-{month:02d}-{day:02d}"
-    match = re.fullmatch(r"(\d{1,2})(?:er)?\s+([A-Za-zÀ-ÿ]+)\s+(\d{4})", value)
-    if match:
-        month = _MONTHS.get(_strip_accents(match.group(2).lower()))
-        if month:
-            return f"{int(match.group(3)):04d}-{month:02d}-{int(match.group(1)):02d}"
-    return None
+    if not value:
+        return None
+    parsed = dateparser.parse(
+        value,
+        languages=["fr", "en"],
+        settings={"DATE_ORDER": "DMY", "PREFER_DAY_OF_MONTH": "first"},
+    )
+    if parsed is None:
+        return None
+    return parsed.strftime("%Y-%m-%d")
 
 
 _TEXT_DATE_PATTERN = (

@@ -581,12 +581,17 @@ def test_normalize_date_formats():
 
     assert _normalize_date("2016-12-28") == "2016-12-28"
     assert _normalize_date("28/12/2016") == "2016-12-28"
+    assert _normalize_date("01/06/2023") == "2023-06-01"
     assert _normalize_date("28.12.2016") == "2016-12-28"
     assert _normalize_date("28 Décembre 2016") == "2016-12-28"
     assert _normalize_date("1er Mars 2025") == "2025-03-01"
+    assert _normalize_date("3 janvier 2024") == "2024-01-03"
     assert _normalize_date("28 December 2016") == "2016-12-28"
+    assert _normalize_date("June 15, 2025") == "2025-06-15"
     assert _normalize_date(None) is None
+    assert _normalize_date("") is None
     assert _normalize_date("sans date") is None
+    assert _normalize_date("120.0") is None
 
 
 async def test_dry_run_writes_nothing(monkeypatch: pytest.MonkeyPatch):

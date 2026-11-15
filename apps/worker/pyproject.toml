@@ -10,6 +10,7 @@ dependencies = [
     "mistralai-workflows[mistralai]>=3.19",
     "pydantic>=2.14.1",
     "structlog>=25.5.0",
+    "dateparser>=1.2",
 ]
 
 [dependency-groups]
