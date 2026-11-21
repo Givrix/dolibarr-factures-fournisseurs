@@ -646,6 +646,45 @@ async def test_extract_parses_json_surrounded_by_prose(monkeypatch: pytest.Monke
     assert json.loads(result["documents"][0]["detail"])["date"] == "2025-07-15"
 
 
+async def test_extract_salvages_invoice_with_invalid_line(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    client.chat.content_override = json.dumps(
+        {
+            "is_invoice": True,
+            "invoice_date": "17 oct. 2018",
+            "supplier_ref": "FR20181116753",
+            "lines": [
+                {
+                    "description": "FORMULE BRONZE PREMIUM 30 000 emails",
+                    "quantity": 1,
+                    "unit_price_ht": 14.95,
+                    "line_total_ht": 14.95,
+                    "vat_rate": 20,
+                },
+                {"description": "Ligne corrompue", "quantity": "abc", "unit_price_ht": {"x": 1}},
+            ],
+            "total_ht": 14.95,
+            "total_ttc": 17.94,
+        },
+        ensure_ascii=False,
+    )
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {"library_name_or_id": "Factures", "supplier_name": "ACME", "dry_run": True},
+    )
+
+    doc = result["documents"][0]
+    assert doc["status"] == "dry_run"
+    assert doc["invoice_ref"] == "FR20181116753"
+    payload = json.loads(doc["detail"])
+    assert payload["date"] == "2018-10-17"
+    assert [line["description"] for line in payload["lignes"]] == [
+        "FORMULE BRONZE PREMIUM 30 000 emails"
+    ]
+
+
 async def test_zero_amount_invoice_is_classified_paid(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     client.chat.extraction = {
@@ -965,10 +1004,53 @@ def test_normalize_date_formats():
     assert _normalize_date("3 janvier 2024") == "2024-01-03"
     assert _normalize_date("28 December 2016") == "2016-12-28"
     assert _normalize_date("June 15, 2025") == "2025-06-15"
+    assert _normalize_date("17 oct. 2018") == "2018-10-17"
+    assert _normalize_date("1er nov. 2018") == "2018-11-01"
     assert _normalize_date(None) is None
     assert _normalize_date("") is None
     assert _normalize_date("sans date") is None
     assert _normalize_date("120.0") is None
+
+
+def test_invoice_line_quantity_null_becomes_one():
+    line = si.InvoiceLine.model_validate(
+        {"description": "FORMULE BRONZE PREMIUM", "quantity": None, "unit_price_ht": 14.95}
+    )
+    assert line.quantity == 1.0
+
+
+def test_compute_lines_uses_default_quantity_when_null():
+    invoice = si.ExtractedInvoice.model_validate(
+        {
+            "lines": [{"description": "Forfait", "quantity": None, "unit_price_ht": 14.95}],
+            "total_ht": 14.95,
+            "total_ttc": 17.94,
+        }
+    )
+    lines = si._compute_lines(invoice)
+    assert lines[0]["qty"] == 1.0
+    assert lines[0]["pu_ht"] == 14.95
+
+
+def test_amounts_as_french_strings_are_coerced():
+    invoice = si.ExtractedInvoice.model_validate(
+        {
+            "lines": [
+                {
+                    "description": "A",
+                    "quantity": 1,
+                    "unit_price_ht": "14,95",
+                    "line_total_ht": "1 234,56",
+                }
+            ],
+            "total_ht": "1\u00a0234,56",
+            "total_ttc": "1\u202f480,00",
+        }
+    )
+    assert invoice.lines[0].unit_price_ht == 14.95
+    assert invoice.lines[0].line_total_ht == 1234.56
+    assert invoice.total_ht == 1234.56
+    assert invoice.total_ttc == 1480.0
 
 
 async def test_dry_run_writes_nothing(monkeypatch: pytest.MonkeyPatch):

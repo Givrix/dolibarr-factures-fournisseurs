@@ -30,13 +30,46 @@ DEFAULT_VAT_RATE = 20.0
 DEFAULT_PAYMENT_MODE_CODE = "PRE"
 
 
+def _coerce_amount(value: Any) -> Any:
+    """Accepte les montants recopies avec la virgule decimale francaise ou des espaces."""
+    if isinstance(value, str):
+        text = (
+            value.strip()
+            .replace("\u202f", "")
+            .replace("\u00a0", "")
+            .replace(" ", "")
+            .replace(",", ".")
+        )
+        try:
+            return float(text)
+        except ValueError:
+            return value
+    return value
+
+
 class InvoiceLine(pydantic.BaseModel):
-    description: str
+    description: str = ""
     quantity: float = 1.0
     unit_price_ht: float | None = None
     unit_price_ttc: float | None = None
     line_total_ht: float | None = None
     vat_rate: float | None = None
+
+    @pydantic.field_validator("quantity", mode="before")
+    @classmethod
+    def _quantity_fallback(cls, value: Any) -> Any:
+        """Une facture sans quantite explicite (forfait) est rattachee a une quantite de 1."""
+        value = _coerce_amount(value)
+        if value is None or value == "":
+            return 1.0
+        return value
+
+    @pydantic.field_validator(
+        "unit_price_ht", "unit_price_ttc", "line_total_ht", "vat_rate", mode="before"
+    )
+    @classmethod
+    def _amount_fallback(cls, value: Any) -> Any:
+        return _coerce_amount(value)
 
 
 class ExtractedInvoice(pydantic.BaseModel):
@@ -55,6 +88,11 @@ class ExtractedInvoice(pydantic.BaseModel):
     total_ht: float | None = None
     total_ttc: float | None = None
     currency: str | None = None
+
+    @pydantic.field_validator("total_ht", "total_ttc", mode="before")
+    @classmethod
+    def _totals_fallback(cls, value: Any) -> Any:
+        return _coerce_amount(value)
 
 
 class DocumentResult(pydantic.BaseModel):
@@ -214,6 +252,26 @@ def _find_date_in_text(text: str) -> str | None:
         if normalized:
             return normalized
     return _search_dates_in_text(text)
+
+
+def _line_is_valid(raw: dict[str, Any]) -> bool:
+    try:
+        InvoiceLine.model_validate(raw)
+        return True
+    except Exception:
+        return False
+
+
+def _salvage_invoice(data: dict[str, Any]) -> ExtractedInvoice | None:
+    """Retente la validation en retirant les lignes defectueuses (extraction partielle)."""
+    salvage = dict(data)
+    salvage["lines"] = [
+        raw for raw in (data.get("lines") or []) if isinstance(raw, dict) and _line_is_valid(raw)
+    ]
+    try:
+        return ExtractedInvoice.model_validate(salvage)
+    except Exception:
+        return None
 
 
 def _loads_json_object(content: str | None) -> dict[str, Any]:
@@ -574,9 +632,18 @@ async def extract_invoice_data(
     parse_error = None
     invoice = None
     try:
-        invoice = ExtractedInvoice.model_validate(_loads_json_object(content))
+        data = _loads_json_object(content)
     except Exception as error:
         parse_error = f"{type(error).__name__}: {error}"
+        data = None
+    if data is not None:
+        try:
+            invoice = ExtractedInvoice.model_validate(data)
+        except Exception as error:
+            parse_error = f"{type(error).__name__}: {error}"
+            invoice = _salvage_invoice(data)
+            if invoice is not None:
+                parse_error = None
     if invoice is not None and not invoice.is_invoice:
         return {"status": "skipped_not_invoice", "detail": None, "invoice": None}
     normalized_date = _normalize_date(invoice.invoice_date) if invoice else None
