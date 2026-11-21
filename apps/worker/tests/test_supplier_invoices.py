@@ -46,6 +46,7 @@ class FakeDolibarr:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.next_invoice_id = 101
         self.existing_invoices: list[dict[str, Any]] = []
+        self.payments_by_invoice: dict[int, list[dict[str, Any]]] = {}
 
     def _record(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((name, arguments))
@@ -104,6 +105,10 @@ class FakeDolibarr:
     async def add_supplier_invoice_payment(self, invoice_id: int, payload: dict[str, Any]) -> Any:
         self._record("supplierinvoicesAddPayment", {"id": invoice_id, **payload})
         return {"id": 1, "amount": 120.0}
+
+    async def list_supplier_invoice_payments(self, invoice_id: int) -> list[dict[str, Any]]:
+        self._record("supplierinvoicesGetPayments", {"id": invoice_id})
+        return self.payments_by_invoice.get(invoice_id, [])
 
     async def reopen_supplier_invoice(self, invoice_id: int) -> Any:
         self._record("supplierinvoicesSettounpaid", {"id": invoice_id})
@@ -495,6 +500,34 @@ async def test_duplicate_with_different_total_can_be_kept(monkeypatch: pytest.Mo
     assert [doc["status"] for doc in result["documents"][:1]] == ["skipped_duplicate"]
     assert "Doublon avec total différent" in (result["documents"][0]["detail"] or "")
     assert not dolibarr.calls_to("createSupplierinvoices")
+
+
+async def test_duplicate_with_payment_cannot_be_removed_autoratically(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dolibarr, client = base_fixtures()
+    dolibarr.existing_invoices = [
+        {"id": 55, "ref": "FF2504-0042", "ref_supplier": "FA-2025-042", "total_ttc": 120.0}
+    ]
+    dolibarr.payments_by_invoice = {55: [{"amount": 120.0, "ref": "PAY2506-001"}]}
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {
+            "library_name_or_id": "Factures",
+            "supplier_name": "ACME",
+            "force_reimport": True,
+        },
+    )
+
+    doc = result["documents"][0]
+    assert doc["status"] == "failed"
+    assert "paiement" in (doc["detail"] or "").lower()
+    assert "rouverture" in (doc["detail"] or "") or "rouvrez" in (doc["detail"] or "").lower()
+    assert not doc["invoice_id"]
+    assert not dolibarr.calls_to("createSupplierinvoices")
+    assert not dolibarr.calls_to("supplierinvoicesSettodraft")
 
 
 async def test_force_reimport_replaces_even_matching_duplicate(monkeypatch: pytest.MonkeyPatch):

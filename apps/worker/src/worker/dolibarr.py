@@ -128,6 +128,9 @@ class DolibarrClient:
             json_body={"close_code": "", "close_note": close_note},
         )
 
+    async def list_supplier_invoice_payments(self, invoice_id: int) -> list[dict[str, Any]]:
+        return await self._list(f"supplierinvoices/{invoice_id}/payments", {})
+
     async def reopen_supplier_invoice(self, invoice_id: int) -> Any:
         return await self.request(
             "POST", f"supplierinvoices/{invoice_id}/settounpaid", json_body={}

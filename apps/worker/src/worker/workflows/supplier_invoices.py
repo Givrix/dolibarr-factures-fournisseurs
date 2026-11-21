@@ -564,18 +564,33 @@ def _same_amount(existing: dict[str, Any], extracted: ExtractedInvoice) -> bool:
 async def _remove_supplier_invoice(dolibarr: Any, invoice_id: int) -> dict[str, Any]:
     """Rouvre une facture, la repasse en brouillon, puis la supprime.
 
-    Les deux transitions sont facultatives (facture déjà au bon statut → erreur bénigne,
-    ou route absente des anciennes versions Dolibarr) : seule la suppression est bloquante.
+    Les transitions sont facultatives (facture déjà au bon statut → erreur bénigne,
+    ou route absente des anciennes versions Dolibarr). La suppression est bloquante :
+    Dolibarr refuse de supprimer une facture avec paiement rattaché et l'API REST ne
+    propose aucun retrait de paiement — dans ce cas, la rouverture est faite mais
+    l'erreur indique le retrait du règlement à faire manuellement dans l'interface.
     """
+    try:
+        await dolibarr.reopen_supplier_invoice(invoice_id)
+    except DolibarrError as error:
+        pass
+    payments = []
+    try:
+        payments = await dolibarr.list_supplier_invoice_payments(invoice_id)
+    except Exception:
+        payments = []
+    if payments:
+        raise ValueError(
+            f"Impossible de supprimer la facture {invoice_id} : {len(payments)} paiement(s) "
+            "rattaché(s). La rouverture est faite ; l'API Dolibarr ne permet pas de retirer "
+            "un règlement : ouvrez la facture dans Dolibarr, supprimez son paiement "
+            "(depuis la fiche du règlement), puis relancez l'import (--force-reimport)."
+        )
     errors: list[str] = []
-    for action, call in (
-        ("rouverture", dolibarr.reopen_supplier_invoice),
-        ("brouillon", dolibarr.set_supplier_invoice_draft),
-    ):
-        try:
-            await call(invoice_id)
-        except DolibarrError as error:
-            errors.append(f"{action} : {_error_text(error)}")
+    try:
+        await dolibarr.set_supplier_invoice_draft(invoice_id)
+    except DolibarrError as error:
+        errors.append(f"brouillon : {_error_text(error)}")
     await dolibarr.delete_supplier_invoice(invoice_id)
     return {"status": "deleted", "errors": errors}
 

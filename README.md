@@ -40,10 +40,14 @@ Pour chaque PDF de la bibliothèque :
    (sortie structurée : date, référence fournisseur, lignes, totaux, TVA).
 2. **Anti-doublon** : si une facture fournisseur avec la même `ref_supplier` existe déjà
    pour ce tiers au même total, le document est marqué `skipped_duplicate`. Si le total
-   diffère (import précédent erroné), l'ancienne facture est supprimée (rouverte, passée en
-   brouillon, puis supprimée via l'API Dolibarr) et la version corrigée est importée à sa
-   place. `--no-replace-mismatched` conserve le comportement bloquant, `--force-reimport`
+   diffère (import précédent erroné), l'ancienne facture est réouverte, passée en brouillon
+   puis supprimée via l'API Dolibarr, et la version corrigée est importée à sa place.
+   `--no-replace-mismatched` conserve le comportement bloquant, `--force-reimport`
    remplace même à total identique.
+   Limite : Dolibarr refuse de supprimer une facture avec règlement rattaché, et l'API
+   REST ne permet pas de retirer un paiement ; dans ce cas la facture est seulement
+   réouverte et le `detail` indique de supprimer son règlement dans l'interface Dolibarr
+   avant de relancer l'import.
 3. **Création** : facture fournisseur créée (`ref: auto`), lignes ajoutées, facture validée.
    En cas d'échec (lignes/validation), la facture brouillon est supprimée.
 4. **Règlement** : paiement ajouté avec `closepaidinvoices=yes`, à la date de facturation,
