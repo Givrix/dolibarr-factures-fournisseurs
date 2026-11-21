@@ -49,6 +49,9 @@ Pour chaque PDF de la bibliothèque :
    réouverte et le `detail` indique de supprimer son règlement dans l'interface Dolibarr
    avant de relancer l'import.
 3. **Création** : facture fournisseur créée (`ref: auto`), lignes ajoutées, facture validée.
+   Les totaux recalculés par Dolibarr sont alors comparés aux montants extraits : en cas
+   d'écart (lignes parasites, colonnes confondues), la facture est supprimée et le
+   document marqué `failed` — jamais réglée.
    En cas d'échec (lignes/validation), la facture brouillon est supprimée.
 4. **Règlement** : paiement ajouté avec `closepaidinvoices=yes`, à la date de facturation,
    sur le compte bancaire choisi, avec le mode de paiement trouvé dans le dictionnaire

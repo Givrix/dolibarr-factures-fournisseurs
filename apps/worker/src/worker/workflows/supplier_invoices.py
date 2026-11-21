@@ -264,16 +264,65 @@ def _line_ht_amount(line: InvoiceLine) -> float | None:
     return None
 
 
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _check_created_totals(fetched: dict[str, Any], extracted: ExtractedInvoice) -> None:
+    """Compare les totaux recalculés par Dolibarr aux montants extraits (arrêt avant paiement).
+
+    Dolibarr calcule lui-même les totaux d'après les lignes ajoutées : si le résultat
+    diverge des totaux extraits de la facture, quelque chose s'est mal transmis (lignes
+    parasites, colonnes confondues) et la facture ne doit pas être réglée en l'état.
+    """
+    tolerance = max(0.05, 0.01 * (len(extracted.lines) or 1))
+    problems: list[str] = []
+    dol_ttc = _to_float(fetched.get("total_ttc"))
+    dol_ht = _to_float(fetched.get("total_ht"))
+    if extracted.total_ttc is not None and dol_ttc is not None:
+        if abs(dol_ttc - extracted.total_ttc) > tolerance:
+            problems.append(
+                f"total TTC {dol_ttc} chez Dolibarr contre {extracted.total_ttc} extrait"
+            )
+    if extracted.total_ht is not None and dol_ht is not None:
+        if abs(dol_ht - extracted.total_ht) > tolerance:
+            problems.append(
+                f"total HT {dol_ht} chez Dolibarr contre {extracted.total_ht} extrait"
+            )
+    if problems:
+        raise ValueError(
+            "Facture non conforme avant règlement : " + " ; ".join(problems) +
+            ". Les lignes extraites ne correspondent pas à la facture PDF."
+        )
+
+
 def _amount_warnings(invoice: ExtractedInvoice) -> list[str]:
     """Signale les incoherences entre lignes et totaux (denonciation d'erreur OCR/modelle)."""
     warnings: list[str] = []
-    if invoice.lines and invoice.total_ht is not None:
+    if invoice.lines:
         amounts = [amount for line in invoice.lines if (amount := _line_ht_amount(line)) is not None]
-        if amounts:
+        if amounts and invoice.total_ht is not None:
             sum_lines = round(sum(amounts), 2)
             if abs(sum_lines - invoice.total_ht) > 0.05:
                 warnings.append(
                     f"Somme des lignes ({sum_lines}) differente du total HT ({invoice.total_ht})"
+                )
+        if amounts and invoice.total_ttc is not None:
+            sum_ttc = round(
+                sum(
+                    amount * (1.0 + (line.vat_rate if line.vat_rate is not None else DEFAULT_VAT_RATE) / 100.0)
+                    for line, amount in zip(invoice.lines, amounts)
+                ),
+                2,
+            )
+            if abs(sum_ttc - invoice.total_ttc) > 0.05:
+                warnings.append(
+                    f"Somme des lignes TTC ({sum_ttc}) differente du total TTC ({invoice.total_ttc})"
                 )
     if (
         invoice.total_ht is not None
@@ -544,14 +593,6 @@ def _same_amount(existing: dict[str, Any], extracted: ExtractedInvoice) -> bool:
 
     Sans totaux comparables, considère le doublon déjà fait (comportement prudent).
     """
-    def _to_float(value: Any) -> float | None:
-        if value is None:
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
     existing_ttc = _to_float(existing.get("total_ttc"))
     existing_ht = _to_float(existing.get("total_ht"))
     if extracted.total_ttc is not None and existing_ttc is not None:
@@ -674,13 +715,17 @@ async def create_supplier_invoice(
         for line in _compute_lines(extracted):
             await dolibarr.add_supplier_invoice_line(invoice_id, line)
         await dolibarr.validate_supplier_invoice(invoice_id)
+        fetched = await dolibarr.get_supplier_invoice(invoice_id)
+        if isinstance(fetched, dict):
+            if fetched.get("ref"):
+                invoice_ref = fetched["ref"]
+            _check_created_totals(fetched, extracted)
     except Exception:
-        await dolibarr.delete_supplier_invoice(invoice_id)
+        try:
+            await _remove_supplier_invoice(dolibarr, invoice_id)
+        except Exception:
+            pass
         raise
-
-    fetched = await dolibarr.get_supplier_invoice(invoice_id)
-    if isinstance(fetched, dict) and fetched.get("ref"):
-        invoice_ref = fetched["ref"]
 
     return {
         "status": "created",

@@ -552,6 +552,29 @@ async def test_force_reimport_replaces_even_matching_duplicate(monkeypatch: pyte
     assert dolibarr.calls_to("createSupplierinvoices")
 
 
+async def test_created_totals_mismatch_fails_before_payment(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+
+    async def totals_from_lines(self, invoice_id: int) -> dict[str, Any]:
+        self._record("getSupplierinvoices", {"id": invoice_id})
+        return {"id": invoice_id, "ref": "FF173", "total_ht": 62.78, "total_ttc": 75.34}
+
+    monkeypatch.setattr(FakeDolibarr, "get_supplier_invoice", totals_from_lines)
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
+    )
+
+    doc = result["documents"][0]
+    assert doc["status"] == "failed"
+    assert "75.34" in (doc["detail"] or "")
+    assert "120" in (doc["detail"] or "")
+    removed_ids = [args["id"] for args in dolibarr.calls_to("removeSupplierinvoices")]
+    assert 101 in removed_ids
+    assert not dolibarr.calls_to("supplierinvoicesAddPayment")
+
+
 async def test_extraction_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     client.chat.extraction = {"is_invoice": True, "invoice_date": None}
@@ -851,6 +874,22 @@ def test_amount_warnings_detect_ttc_below_ht():
     warnings = _amount_warnings(invoice)
     assert len(warnings) == 1
     assert "TTC" in warnings[0]
+
+
+def test_amount_warnings_detect_lines_ttc_mismatch_without_ht():
+    from worker.workflows.supplier_invoices import ExtractedInvoice, _amount_warnings
+
+    invoice = ExtractedInvoice(
+        lines=[
+            {"description": "A", "quantity": 1.0, "unit_price_ht": 44.78, "vat_rate": 20.0},
+            {"description": "B", "quantity": 1.0, "unit_price_ht": 18.0, "vat_rate": 20.0},
+        ],
+        total_ttc=29.68,
+    )
+    warnings = _amount_warnings(invoice)
+    assert len(warnings) == 1
+    assert "75.34" in warnings[0]
+    assert "29.68" in warnings[0]
 
 
 def test_amount_warnings_empty_when_consistent():
