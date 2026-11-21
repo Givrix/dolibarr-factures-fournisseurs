@@ -101,7 +101,7 @@ async def main() -> int:
         default=None,
         help="ID Dolibarr du mode de paiement (évite la lecture des dictionnaires, si 403)",
     )
-    parser.add_argument("--document-id", nargs="*", default=[], help="IDs de documents à traiter (tous si vide)")
+    parser.add_argument("--document-id", nargs="*", default=[], help="IDs ou noms de documents à traiter (tous si vide)")
     parser.add_argument(
         "--limit",
         type=int,

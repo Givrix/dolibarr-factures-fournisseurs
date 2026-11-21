@@ -409,18 +409,31 @@ async def list_library_pdfs(
         available = ", ".join(lib.name for lib in libraries)
         raise ValueError(f"Bibliothèque '{library_name_or_id}' introuvable. Bibliothèques : {available or 'aucune'}")
 
-    wanted_ids = set(document_ids)
+    wanted_ids = {value.strip().lower() for value in document_ids if value.strip()}
     documents = (await client.beta.libraries.documents.list_async(library_id=library.id)).data
     pdfs = []
     for document in documents:
-        if wanted_ids and document.id not in wanted_ids:
+        if wanted_ids and not _document_matches(document, wanted_ids):
             continue
         if (document.extension or "").lower() != "pdf":
             continue
         pdfs.append({"id": document.id, "name": document.name})
     if wanted_ids and not pdfs:
-        raise ValueError(f"Aucun PDF trouvé parmi les documents demandés dans '{library.name}'")
+        available = "\n".join(f"  - {doc.id} : {doc.name}" for doc in documents) or "  (aucun)"
+        raise ValueError(
+            f"Aucun document trouvé parmi {sorted(wanted_ids)} dans '{library.name}'. "
+            f"Documents disponibles (id : nom) :\n{available}"
+        )
     return {"library_id": library.id, "library_name": library.name, "pdfs": pdfs}
+
+
+def _document_matches(document: Any, wanted: set[str]) -> bool:
+    """Compare un document aux valeurs demandees : id exact, nom exact, ou nom sans .pdf."""
+    targets = {str(document.id).strip().lower()}
+    name = str(document.name or "").strip().lower()
+    targets.add(name)
+    targets.add(name.removesuffix(".pdf"))
+    return bool(wanted & targets)
 
 
 @workflows.activity(name="library-extract-invoice-data")

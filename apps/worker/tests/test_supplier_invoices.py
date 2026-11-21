@@ -565,6 +565,58 @@ async def test_pdf_attachment_failure_does_not_fail_document(monkeypatch: pytest
     assert "Liaison du PDF impossible" in result["documents"][0]["detail"]
 
 
+async def test_document_selection_accepts_filename_and_stem(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    install_fakes(monkeypatch, dolibarr, client)
+
+    async def run(document_ids: list[str]) -> Any:
+        return await run_workflow(
+            monkeypatch,
+            {
+                "library_name_or_id": "Factures",
+                "supplier_name": "ACME",
+                "dry_run": True,
+                "document_ids": document_ids,
+            },
+        )
+
+    by_name = await run(["facture-a.pdf"])
+    assert [doc["document"] for doc in by_name["documents"]] == ["facture-a.pdf"]
+
+    by_stem = await run(["facture-b"])
+    assert [doc["document"] for doc in by_stem["documents"]] == ["facture-b.pdf"]
+
+
+async def test_unknown_document_id_lists_available_documents(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    install_fakes(monkeypatch, dolibarr, client)
+
+    env = await WorkflowEnvironment.start_time_skipping()
+    async with env, workflows_testing.create_test_worker(
+        env,
+        workflows=[SupplierInvoiceImportWorkflow],
+        activities=REAL_ACTIVITIES,
+    ):
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await env.client.execute_workflow(
+                SupplierInvoiceImportWorkflow.run,
+                {
+                    "library_name_or_id": "Factures",
+                    "supplier_name": "ACME",
+                    "document_ids": ["inv_inconnu"],
+                },
+                id="test-import-unknown-document",
+                task_queue=TASK_QUEUE,
+            )
+    cause: BaseException | None = exc_info.value
+    message = str(exc_info.value)
+    while cause is not None and "inv_inconnu" not in message:
+        cause = cause.__cause__
+        message = str(cause) if cause is not None else ""
+    assert "inv_inconnu" in message
+    assert "doc-1" in message and "facture-a.pdf" in message
+
+
 async def test_max_documents_limits_processing(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     install_fakes(monkeypatch, dolibarr, client)
