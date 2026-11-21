@@ -418,6 +418,59 @@ async def test_duplicate_invoice_is_skipped(monkeypatch: pytest.MonkeyPatch):
     assert not dolibarr.calls_to("supplierinvoicesAddPayment")
 
 
+async def test_duplicate_with_different_total_is_reimported(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    dolibarr.existing_invoices = [
+        {"id": 55, "ref": "FF2504-0042", "ref_supplier": "FA-2025-042", "total_ttc": 44.78}
+    ]
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
+    )
+
+    assert [doc["status"] for doc in result["documents"][:1]] == ["paid"]
+    assert "44.78" in (result["documents"][0]["detail"] or "")
+    assert "FF2504-0042" in (result["documents"][0]["detail"] or "")
+    assert dolibarr.calls_to("createSupplierinvoices")
+
+
+async def test_duplicate_with_matching_total_is_skipped(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    dolibarr.existing_invoices = [
+        {"id": 55, "ref": "FF2504-0042", "ref_supplier": "FA-2025-042", "total_ttc": 120.0}
+    ]
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
+    )
+
+    assert [doc["status"] for doc in result["documents"][:1]] == ["skipped_duplicate"]
+    assert not dolibarr.calls_to("createSupplierinvoices")
+
+
+async def test_duplicate_with_different_total_can_be_kept(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    dolibarr.existing_invoices = [
+        {"id": 55, "ref": "FF2504-0042", "ref_supplier": "FA-2025-042", "total_ttc": 44.78}
+    ]
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {
+            "library_name_or_id": "Factures",
+            "supplier_name": "ACME",
+            "replace_mismatched_duplicates": False,
+        },
+    )
+
+    assert [doc["status"] for doc in result["documents"][:1]] == ["skipped_duplicate"]
+    assert "Doublon avec total différent" in (result["documents"][0]["detail"] or "")
+    assert not dolibarr.calls_to("createSupplierinvoices")
+
+
 async def test_extraction_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     client.chat.extraction = {"is_invoice": True, "invoice_date": None}

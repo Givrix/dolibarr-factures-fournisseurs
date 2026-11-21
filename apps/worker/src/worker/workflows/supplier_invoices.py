@@ -107,6 +107,13 @@ class SupplierInvoiceImportInput(pydantic.BaseModel):
             "la lecture des dictionnaires est évitée (utile si l'API renvoie 403)"
         ),
     )
+    replace_mismatched_duplicates: bool = pydantic.Field(
+        default=True,
+        description=(
+            "Si un doublon (même ref fournisseur) existe avec un total différent, "
+            "importer quand même la version corrigée (l'ancienne facture reste à corriger)"
+        ),
+    )
     dry_run: bool = pydantic.Field(
         default=False,
         description="Si vrai : extraction seule, aucune écriture dans Dolibarr",
@@ -525,16 +532,40 @@ async def extract_invoice_data(
     }
 
 
+def _same_amount(existing: dict[str, Any], extracted: ExtractedInvoice) -> bool:
+    """Compare une facture existante Dolibarr aux montants extraits (tolérance 0,05).
+
+    Sans totaux comparables, considère le doublon déjà fait (comportement prudent).
+    """
+    def _to_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    existing_ttc = _to_float(existing.get("total_ttc"))
+    existing_ht = _to_float(existing.get("total_ht"))
+    if extracted.total_ttc is not None and existing_ttc is not None:
+        return abs(existing_ttc - extracted.total_ttc) <= 0.05
+    if extracted.total_ht is not None and existing_ht is not None:
+        return abs(existing_ht - extracted.total_ht) <= 0.05
+    return True
+
+
 @workflows.activity(name="dolibarr-create-supplier-invoice")
 async def create_supplier_invoice(
     supplier_id: int,
     supplier_name: str,
     invoice: dict[str, Any],
     document_name: str,
+    replace_mismatched_duplicates: bool = True,
 ) -> dict[str, Any]:
     dolibarr = _dolibarr_client()
     extracted = ExtractedInvoice.model_validate(invoice)
     supplier_ref = (extracted.supplier_ref or "").strip()
+    duplicate_note: str | None = None
 
     if supplier_ref:
         existing = await dolibarr.list_supplier_invoices(
@@ -543,12 +574,30 @@ async def create_supplier_invoice(
             limit=10,
         )
         if existing:
-            return {
-                "status": "skipped_duplicate",
-                "invoice_id": int(existing[0]["id"]),
-                "invoice_ref": existing[0].get("ref"),
-                "detail": f"Facture fournisseur '{supplier_ref}' déjà présente dans Dolibarr",
-            }
+            if any(_same_amount(candidate, extracted) for candidate in existing):
+                return {
+                    "status": "skipped_duplicate",
+                    "invoice_id": int(existing[0]["id"]),
+                    "invoice_ref": existing[0].get("ref"),
+                    "detail": f"Facture fournisseur '{supplier_ref}' déjà présente dans Dolibarr",
+                }
+            old = existing[0]
+            if not replace_mismatched_duplicates:
+                return {
+                    "status": "skipped_duplicate",
+                    "invoice_id": int(old["id"]),
+                    "invoice_ref": old.get("ref"),
+                    "detail": (
+                        f"Doublon avec total différent conservé : existant "
+                        f"{old.get('total_ttc', old.get('total_ht', '?'))} €, extrait "
+                        f"{extracted.total_ttc if extracted.total_ttc is not None else extracted.total_ht} €"
+                    ),
+                }
+            duplicate_note = (
+                f"Doublon total différent : ancienne facture {old.get('ref', old.get('id'))} "
+                f"(total {old.get('total_ttc', old.get('total_ht', '?'))} €) conservée, "
+                "à corriger manuellement dans Dolibarr"
+            )
 
     payload: dict[str, Any] = {
         "ref": "auto",
@@ -583,7 +632,7 @@ async def create_supplier_invoice(
         "status": "created",
         "invoice_id": invoice_id,
         "invoice_ref": invoice_ref,
-        "detail": None,
+        "detail": duplicate_note,
     }
 
 
@@ -705,6 +754,7 @@ class SupplierInvoiceImportWorkflow:
                     payment_mode_id=payment_mode["id"],
                     bank_account_id=bank_account["id"],
                     dry_run=input.dry_run,
+                    replace_mismatched_duplicates=input.replace_mismatched_duplicates,
                 )
             )
 
@@ -726,6 +776,7 @@ async def _process_document(
     payment_mode_id: int,
     bank_account_id: int,
     dry_run: bool = False,
+    replace_mismatched_duplicates: bool = True,
 ) -> DocumentResult:
     document_id = document["id"]
     document_name = document["name"]
@@ -767,6 +818,7 @@ async def _process_document(
             supplier_name=supplier_name,
             invoice=invoice,
             document_name=document_name,
+            replace_mismatched_duplicates=replace_mismatched_duplicates,
         )
         if created["status"] != "created":
             return DocumentResult(
@@ -810,12 +862,12 @@ async def _process_document(
                 amount_paid=paid.get("amount_paid") or total_ttc or None,
             )
 
+        duplicate_note = created.get("detail")
         if warnings:
-            result.detail = (
-                f"{result.detail} | Avertissement extracteur : {' ; '.join(warnings)}"
-                if result.detail
-                else f"Avertissement extracteur : {' ; '.join(warnings)}"
-            )
+            note = f"Avertissement extracteur : {' ; '.join(warnings)}"
+            result.detail = f"{result.detail} | {note}" if result.detail else note
+        if duplicate_note:
+            result.detail = f"{result.detail} | {duplicate_note}" if result.detail else duplicate_note
 
         if created_ref:
             try:

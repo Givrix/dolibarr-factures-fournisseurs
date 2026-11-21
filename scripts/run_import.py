@@ -109,6 +109,11 @@ async def main() -> int:
         help="Limiter le nombre de PDF traités (pratique pour les tests)",
     )
     parser.add_argument("--no-create-supplier", action="store_true", help="Ne pas créer le fournisseur absent")
+    parser.add_argument(
+        "--no-replace-mismatched",
+        action="store_true",
+        help="Ne pas réimporter un doublon dont le total diffère de la facture existante",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Extraction seule, aucune écriture dans Dolibarr")
     parser.add_argument("--deployment", default=None, help="Nom du déploiement (défaut : DEPLOYMENT_NAME du .env)")
     args = parser.parse_args()
@@ -142,6 +147,7 @@ async def main() -> int:
             "payment_mode_code": args.payment_mode,
             "payment_mode_id": args.payment_mode_id,
             "create_missing_supplier": not args.no_create_supplier,
+            "replace_mismatched_duplicates": not args.no_replace_mismatched,
             "document_ids": document_ids,
             "max_documents": args.limit,
             "dry_run": args.dry_run,
