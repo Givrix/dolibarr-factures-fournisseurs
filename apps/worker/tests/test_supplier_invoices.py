@@ -892,6 +892,56 @@ def test_amount_warnings_detect_lines_ttc_mismatch_without_ht():
     assert "29.68" in warnings[0]
 
 
+def test_compute_lines_prefers_displayed_line_total_over_inconsistent_unit_price():
+    from worker.workflows.supplier_invoices import ExtractedInvoice, _compute_lines
+
+    invoice = ExtractedInvoice(
+        lines=[
+            {
+                "description": "Messages P1",
+                "quantity": 19470.0,
+                "unit_price_ht": 0.00231,
+                "line_total_ht": 10.33,
+                "vat_rate": 20.0,
+            }
+        ]
+    )
+    lines = _compute_lines(invoice)
+    assert lines[0]["pu_ht"] == pytest.approx(10.33 / 19470, rel=1e-4)
+
+
+def test_discount_line_balances_totals():
+    from worker.workflows.supplier_invoices import ExtractedInvoice, _amount_warnings, _compute_lines
+
+    invoice = ExtractedInvoice(
+        lines=[
+            {"description": "Messages P1", "quantity": 1.0, "line_total_ht": 10.33, "vat_rate": 20.0},
+            {"description": "Essential D1", "quantity": 1.0, "line_total_ht": 18.0, "vat_rate": 20.0},
+            {"description": "Crédit appliqué", "quantity": 1.0, "line_total_ht": -3.6, "vat_rate": 20.0},
+        ],
+        total_ttc=29.68,
+    )
+    lines = _compute_lines(invoice)
+    assert lines[2]["pu_ht"] == pytest.approx(-3.6)
+    assert _amount_warnings(invoice) == []
+
+
+def test_created_totals_ht_subtotal_does_not_block_when_ttc_matches():
+    from worker.workflows.supplier_invoices import ExtractedInvoice, _check_created_totals
+
+    extracted = ExtractedInvoice(
+        lines=[
+            {"description": "A", "quantity": 1.0, "line_total_ht": 10.33, "vat_rate": 20.0},
+            {"description": "B", "quantity": 1.0, "line_total_ht": 18.0, "vat_rate": 20.0},
+            {"description": "Crédit", "quantity": 1.0, "line_total_ht": -3.6, "vat_rate": 20.0},
+        ],
+        total_ht=28.33,
+        total_ttc=29.68,
+    )
+    fetched = {"total_ht": 24.73, "total_ttc": 29.68}
+    _check_created_totals(fetched, extracted)  # ne doit pas lever
+
+
 def test_amount_warnings_empty_when_consistent():
     from worker.workflows.supplier_invoices import ExtractedInvoice, _amount_warnings
 

@@ -279,17 +279,21 @@ def _check_created_totals(fetched: dict[str, Any], extracted: ExtractedInvoice) 
     Dolibarr calcule lui-même les totaux d'après les lignes ajoutées : si le résultat
     diverge des totaux extraits de la facture, quelque chose s'est mal transmis (lignes
     parasites, colonnes confondues) et la facture ne doit pas être réglée en l'état.
+    Seul le TTC fait foi (c'est lui qui est réglé) : le HT extrait peut être un
+    sous-total avant remises, il n'arrête donc que si le TTC n'est pas comparable.
     """
     tolerance = max(0.05, 0.01 * (len(extracted.lines) or 1))
     problems: list[str] = []
     dol_ttc = _to_float(fetched.get("total_ttc"))
     dol_ht = _to_float(fetched.get("total_ht"))
+    ttc_compared = False
     if extracted.total_ttc is not None and dol_ttc is not None:
+        ttc_compared = True
         if abs(dol_ttc - extracted.total_ttc) > tolerance:
             problems.append(
                 f"total TTC {dol_ttc} chez Dolibarr contre {extracted.total_ttc} extrait"
             )
-    if extracted.total_ht is not None and dol_ht is not None:
+    if not ttc_compared and extracted.total_ht is not None and dol_ht is not None:
         if abs(dol_ht - extracted.total_ht) > tolerance:
             problems.append(
                 f"total HT {dol_ht} chez Dolibarr contre {extracted.total_ht} extrait"
@@ -305,18 +309,22 @@ def _amount_warnings(invoice: ExtractedInvoice) -> list[str]:
     """Signale les incoherences entre lignes et totaux (denonciation d'erreur OCR/modelle)."""
     warnings: list[str] = []
     if invoice.lines:
-        amounts = [amount for line in invoice.lines if (amount := _line_ht_amount(line)) is not None]
-        if amounts and invoice.total_ht is not None:
-            sum_lines = round(sum(amounts), 2)
+        pairs = [
+            (amount, line)
+            for line in invoice.lines
+            if (amount := _line_ht_amount(line)) is not None
+        ]
+        if pairs and invoice.total_ht is not None:
+            sum_lines = round(sum(amount for amount, _ in pairs), 2)
             if abs(sum_lines - invoice.total_ht) > 0.05:
                 warnings.append(
                     f"Somme des lignes ({sum_lines}) differente du total HT ({invoice.total_ht})"
                 )
-        if amounts and invoice.total_ttc is not None:
+        if pairs and invoice.total_ttc is not None:
             sum_ttc = round(
                 sum(
                     amount * (1.0 + (line.vat_rate if line.vat_rate is not None else DEFAULT_VAT_RATE) / 100.0)
-                    for line, amount in zip(invoice.lines, amounts)
+                    for amount, line in pairs
                 ),
                 2,
             )
@@ -341,17 +349,19 @@ def _compute_lines(invoice: ExtractedInvoice) -> list[dict[str, Any]]:
         for line in invoice.lines:
             vat_rate = line.vat_rate if line.vat_rate is not None else DEFAULT_VAT_RATE
             pu_ht = line.unit_price_ht
+            if line.line_total_ht is not None and line.quantity:
+                derived = line.line_total_ht / line.quantity
+                if pu_ht is None or abs(derived - pu_ht) > max(0.001, 0.05 * abs(pu_ht)):
+                    pu_ht = derived
             if pu_ht is None and line.unit_price_ttc is not None:
                 pu_ht = line.unit_price_ttc / (1.0 + vat_rate / 100.0)
-            if pu_ht is None and line.line_total_ht is not None and line.quantity:
-                pu_ht = line.line_total_ht / line.quantity
             if pu_ht is None:
                 pu_ht = 0.0
             lines.append(
                 {
                     "description": line.description,
                     "qty": line.quantity,
-                    "pu_ht": round(pu_ht, 4),
+                    "pu_ht": round(pu_ht, 8),
                     "tva_tx": vat_rate,
                 }
             )
@@ -371,7 +381,7 @@ def _compute_lines(invoice: ExtractedInvoice) -> list[dict[str, Any]]:
         {
             "description": f"Facture {invoice.supplier_ref or 'fournisseur'}",
             "qty": 1.0,
-            "pu_ht": round(pu_ht, 4),
+            "pu_ht": round(pu_ht, 8),
             "tva_tx": vat_rate,
         }
     ]
@@ -542,7 +552,12 @@ async def extract_invoice_data(
                     "le total HT de la ligne quand il figure sur la facture, total_ht est le "
                     "total HT de toute la facture : ne confonds jamais ces colonnes et ne recopie "
                     "jamais un sous-total ou un total de facture dans une ligne ; les taux de TVA "
-                    "sont en pourcentage (20 pour 20 %)."
+                    "sont en pourcentage (20 pour 20 %). S'il existe une remise, un rabais, une "
+                    "réduction, un coupon, un crédit appliqué ou toute ligne correctrice négative, "
+                    "extrais-la comme une ligne avec unit_price_ht et line_total_ht NÉGATIFS. "
+                    "total_ht et total_ttc sont les totaux définitifs de la facture, une fois les "
+                    "remises déduites. Quand une ligne affiche à la fois un prix unitaire et un "
+                    "total, line_total_ht doit être la valeur affichée pour cette ligne."
                 ),
             },
             {"role": "user", "content": f"Document : {document_name}\n\n{str(text)[:60000]}"},
