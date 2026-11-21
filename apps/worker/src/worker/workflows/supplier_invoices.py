@@ -35,6 +35,7 @@ class InvoiceLine(pydantic.BaseModel):
     quantity: float = 1.0
     unit_price_ht: float | None = None
     unit_price_ttc: float | None = None
+    line_total_ht: float | None = None
     vat_rate: float | None = None
 
 
@@ -237,17 +238,52 @@ def _error_text(error: BaseException) -> str:
     return " | ".join(parts) or type(error).__name__
 
 
+def _line_ht_amount(line: InvoiceLine) -> float | None:
+    """Total HT d'une ligne extraite, par la source la plus fiable disponible."""
+    if line.line_total_ht is not None:
+        return line.line_total_ht
+    vat_rate = line.vat_rate if line.vat_rate is not None else DEFAULT_VAT_RATE
+    if line.unit_price_ht is not None:
+        return line.unit_price_ht * (line.quantity or 1.0)
+    if line.unit_price_ttc is not None:
+        return line.unit_price_ttc / (1.0 + vat_rate / 100.0) * (line.quantity or 1.0)
+    return None
+
+
+def _amount_warnings(invoice: ExtractedInvoice) -> list[str]:
+    """Signale les incoherences entre lignes et totaux (denonciation d'erreur OCR/modelle)."""
+    warnings: list[str] = []
+    if invoice.lines and invoice.total_ht is not None:
+        amounts = [amount for line in invoice.lines if (amount := _line_ht_amount(line)) is not None]
+        if amounts:
+            sum_lines = round(sum(amounts), 2)
+            if abs(sum_lines - invoice.total_ht) > 0.05:
+                warnings.append(
+                    f"Somme des lignes ({sum_lines}) differente du total HT ({invoice.total_ht})"
+                )
+    if (
+        invoice.total_ht is not None
+        and invoice.total_ttc is not None
+        and invoice.total_ttc < invoice.total_ht
+    ):
+        warnings.append(
+            f"Total TTC ({invoice.total_ttc}) inferieur au total HT ({invoice.total_ht})"
+        )
+    return warnings
+
+
 def _compute_lines(invoice: ExtractedInvoice) -> list[dict[str, Any]]:
     if invoice.lines:
         lines = []
         for line in invoice.lines:
             vat_rate = line.vat_rate if line.vat_rate is not None else DEFAULT_VAT_RATE
             pu_ht = line.unit_price_ht
+            if pu_ht is None and line.unit_price_ttc is not None:
+                pu_ht = line.unit_price_ttc / (1.0 + vat_rate / 100.0)
+            if pu_ht is None and line.line_total_ht is not None and line.quantity:
+                pu_ht = line.line_total_ht / line.quantity
             if pu_ht is None:
-                if line.unit_price_ttc is not None:
-                    pu_ht = line.unit_price_ttc / (1.0 + vat_rate / 100.0)
-                else:
-                    pu_ht = 0.0
+                pu_ht = 0.0
             lines.append(
                 {
                     "description": line.description,
@@ -422,10 +458,15 @@ async def extract_invoice_data(
                     "écrite, par exemple « 01/06/2023 » ou « 01 juin 2023 » ; jamais null si une "
                     "date apparaît dans le document), supplier_ref (numéro de la facture chez le "
                     "fournisseur), lines (liste d'objets {description, quantity, unit_price_ht, "
-                    "unit_price_ttc, vat_rate}), total_ht, total_ttc, currency. Réponds "
-                    "uniquement à partir du document. Montants en nombres décimaux, prix "
-                    "unitaires hors taxes quand ils sont disponibles, taux de TVA en pourcentage "
-                    "(20 pour 20 %)."
+                    "unit_price_ttc, line_total_ht, vat_rate}), total_ht, total_ttc, currency. "
+                    "Réponds uniquement à partir du document. Règles sur les montants : les "
+                    "factures françaises écrivent les montants avec une virgule décimale « 10,33 » "
+                    ": convertis-les en nombres à point (10.33), sans séparateur de milliers ; "
+                    "unit_price_ht est le prix unitaire hors taxes de la ligne, line_total_ht est "
+                    "le total HT de la ligne quand il figure sur la facture, total_ht est le "
+                    "total HT de toute la facture : ne confonds jamais ces colonnes et ne recopie "
+                    "jamais un sous-total ou un total de facture dans une ligne ; les taux de TVA "
+                    "sont en pourcentage (20 pour 20 %)."
                 ),
             },
             {"role": "user", "content": f"Document : {document_name}\n\n{str(text)[:60000]}"},
@@ -463,7 +504,12 @@ async def extract_invoice_data(
     invoice.invoice_date = normalized_date
     if invoice.total_ttc is None and invoice.total_ht is None and not invoice.lines:
         return {"status": "failed", "detail": "Aucun montant trouvé dans la facture", "invoice": None}
-    return {"status": "ok", "detail": None, "invoice": invoice.model_dump()}
+    return {
+        "status": "ok",
+        "detail": None,
+        "invoice": invoice.model_dump(),
+        "warnings": _amount_warnings(invoice),
+    }
 
 
 @workflows.activity(name="dolibarr-create-supplier-invoice")
@@ -681,22 +727,26 @@ async def _process_document(
                 detail=extracted.get("detail"),
             )
         invoice = extracted["invoice"]
+        warnings = list(extracted.get("warnings") or [])
 
         if dry_run:
+            detail = json.dumps(
+                {
+                    "date": invoice.get("invoice_date"),
+                    "lignes": invoice.get("lines", []),
+                    "total_ht": invoice.get("total_ht"),
+                    "total_ttc": invoice.get("total_ttc"),
+                    "devise": invoice.get("currency"),
+                },
+                ensure_ascii=False,
+            )
+            if warnings:
+                detail = f"{warnings} | {detail}"
             return DocumentResult(
                 document=document_name,
                 status="dry_run",
                 invoice_ref=invoice.get("supplier_ref"),
-                detail=json.dumps(
-                    {
-                        "date": invoice.get("invoice_date"),
-                        "lignes": invoice.get("lines", []),
-                        "total_ht": invoice.get("total_ht"),
-                        "total_ttc": invoice.get("total_ttc"),
-                        "devise": invoice.get("currency"),
-                    },
-                    ensure_ascii=False,
-                ),
+                detail=detail,
             )
 
         created = await create_supplier_invoice(
@@ -745,6 +795,13 @@ async def _process_document(
                 invoice_id=created_id,
                 invoice_ref=created_ref,
                 amount_paid=paid.get("amount_paid") or total_ttc or None,
+            )
+
+        if warnings:
+            result.detail = (
+                f"{result.detail} | Avertissement extracteur : {' ; '.join(warnings)}"
+                if result.detail
+                else f"Avertissement extracteur : {' ; '.join(warnings)}"
             )
 
         if created_ref:

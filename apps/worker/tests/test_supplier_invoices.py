@@ -517,6 +517,36 @@ async def test_zero_amount_invoice_is_classified_paid(monkeypatch: pytest.Monkey
     assert client.beta.libraries.documents.deleted == ["doc-1", "doc-2"]
 
 
+async def test_amount_mismatch_warning_is_surfaced_on_paid_result(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dolibarr, client = base_fixtures()
+    client.chat.extraction = {
+        "is_invoice": True,
+        "invoice_date": "2025-06-15",
+        "supplier_ref": "FA-CONFUSION",
+        "lines": [
+            {"description": "Article A", "quantity": 1.0, "unit_price_ht": 10.33, "vat_rate": 20.0},
+            {"description": "Article B", "quantity": 1.0, "unit_price_ht": 18.0, "vat_rate": 20.0},
+        ],
+        "total_ht": 44.78,
+        "total_ttc": 53.74,
+        "currency": "EUR",
+    }
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
+    )
+
+    assert [doc["status"] for doc in result["documents"]] == ["paid", "paid"]
+    assert (
+        "Avertissement extracteur" in result["documents"][0]["detail"]
+        or "Avertissement extracteur" in result["documents"][1]["detail"]
+    )
+    assert "44.78" in result["documents"][0]["detail"] or "44.78" in result["documents"][1]["detail"]
+
+
 async def test_pdf_attachment_failure_does_not_fail_document(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     install_fakes(monkeypatch, dolibarr, client)
@@ -593,6 +623,59 @@ def test_compute_lines_from_totals_only():
     assert len(lines) == 1
     assert lines[0]["tva_tx"] == 20.0
     assert lines[0]["pu_ht"] == pytest.approx(100.0, rel=1e-3)
+
+
+def test_compute_lines_uses_line_total_when_unit_price_missing():
+    from worker.workflows.supplier_invoices import ExtractedInvoice, _compute_lines
+
+    invoice = ExtractedInvoice(
+        lines=[
+            {
+                "description": "Article",
+                "quantity": 4.0,
+                "line_total_ht": 41.32,
+                "vat_rate": 20.0,
+            }
+        ]
+    )
+    lines = _compute_lines(invoice)
+    assert lines[0]["pu_ht"] == pytest.approx(10.33, rel=1e-3)
+
+
+def test_amount_warnings_detect_lines_total_mismatch():
+    from worker.workflows.supplier_invoices import ExtractedInvoice, _amount_warnings
+
+    invoice = ExtractedInvoice(
+        lines=[
+            {"description": "A", "quantity": 1.0, "unit_price_ht": 10.33},
+            {"description": "B", "quantity": 1.0, "unit_price_ht": 18.0},
+        ],
+        total_ht=44.78,
+    )
+    warnings = _amount_warnings(invoice)
+    assert len(warnings) == 1
+    assert "28.33" in warnings[0]
+    assert "44.78" in warnings[0]
+
+
+def test_amount_warnings_detect_ttc_below_ht():
+    from worker.workflows.supplier_invoices import ExtractedInvoice, _amount_warnings
+
+    invoice = ExtractedInvoice(total_ht=100.0, total_ttc=90.0)
+    warnings = _amount_warnings(invoice)
+    assert len(warnings) == 1
+    assert "TTC" in warnings[0]
+
+
+def test_amount_warnings_empty_when_consistent():
+    from worker.workflows.supplier_invoices import ExtractedInvoice, _amount_warnings
+
+    invoice = ExtractedInvoice(
+        lines=[{"description": "A", "quantity": 2.0, "unit_price_ht": 50.0}],
+        total_ht=100.0,
+        total_ttc=120.0,
+    )
+    assert _amount_warnings(invoice) == []
 
 
 def test_normalize_date_formats():
