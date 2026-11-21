@@ -128,6 +128,18 @@ class DolibarrClient:
             json_body={"close_code": "", "close_note": close_note},
         )
 
+    async def reopen_supplier_invoice(self, invoice_id: int) -> Any:
+        return await self.request(
+            "POST", f"supplierinvoices/{invoice_id}/settounpaid", json_body={}
+        )
+
+    async def set_supplier_invoice_draft(self, invoice_id: int) -> Any:
+        return await self.request(
+            "POST",
+            f"supplierinvoices/{invoice_id}/settodraft",
+            params={"idwarehouse": -1, "notrigger": 0},
+        )
+
     async def delete_supplier_invoice(self, invoice_id: int) -> Any:
         return await self.request("DELETE", f"supplierinvoices/{invoice_id}")
 

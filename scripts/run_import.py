@@ -114,6 +114,11 @@ async def main() -> int:
         action="store_true",
         help="Ne pas réimporter un doublon dont le total diffère de la facture existante",
     )
+    parser.add_argument(
+        "--force-reimport",
+        action="store_true",
+        help="Remplacer toute facture du même fournisseur, même au total identique",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Extraction seule, aucune écriture dans Dolibarr")
     parser.add_argument("--deployment", default=None, help="Nom du déploiement (défaut : DEPLOYMENT_NAME du .env)")
     args = parser.parse_args()
@@ -148,6 +153,7 @@ async def main() -> int:
             "payment_mode_id": args.payment_mode_id,
             "create_missing_supplier": not args.no_create_supplier,
             "replace_mismatched_duplicates": not args.no_replace_mismatched,
+            "force_reimport": args.force_reimport,
             "document_ids": document_ids,
             "max_documents": args.limit,
             "dry_run": args.dry_run,

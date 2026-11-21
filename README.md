@@ -30,7 +30,8 @@ Entrée du workflow `dolibarr-supplier-invoices-import` :
 | `document_ids` | `[]` | Restreint l'import à certains documents (tous les PDF si vide) |
 | `max_documents` | `null` | Limite le nombre de PDF traités, dans l'ordre de la bibliothèque |
 | `payment_mode_id` | `null` | ID Dolibarr du mode de paiement (évite la lecture des dictionnaires) |
-| `replace_mismatched_duplicates` | `true` | Réimporte un doublon (même ref) dont le total diffère de la facture existante |
+| `replace_mismatched_duplicates` | `true` | Supprime l'ancienne facture (rouvrir → brouillon → supprimer) et réimporte un doublon au total différent |
+| `force_reimport` | `false` | Remplace toute facture du même fournisseur, même à total identique (`--force-reimport`) |
 | `dry_run` | `false` | Si vrai : extraction seule, aucune écriture dans Dolibarr |
 
 Pour chaque PDF de la bibliothèque :
@@ -38,10 +39,11 @@ Pour chaque PDF de la bibliothèque :
 1. **Extraction** : le texte OCR de la bibliothèque est analysé par `mistral-medium-latest`
    (sortie structurée : date, référence fournisseur, lignes, totaux, TVA).
 2. **Anti-doublon** : si une facture fournisseur avec la même `ref_supplier` existe déjà
-   pour ce tiers avec le même total, le document est marqué `skipped_duplicate`. Si le total
-   diffère (import précédent erroné), la version corrigée est importée quand même et
-   l'ancienne facture est signalée dans le `detail` (à corriger manuellement, `false` pour
-   conserver l'ancien comportement, `--no-replace-mismatched` côté script).
+   pour ce tiers au même total, le document est marqué `skipped_duplicate`. Si le total
+   diffère (import précédent erroné), l'ancienne facture est supprimée (rouverte, passée en
+   brouillon, puis supprimée via l'API Dolibarr) et la version corrigée est importée à sa
+   place. `--no-replace-mismatched` conserve le comportement bloquant, `--force-reimport`
+   remplace même à total identique.
 3. **Création** : facture fournisseur créée (`ref: auto`), lignes ajoutées, facture validée.
    En cas d'échec (lignes/validation), la facture brouillon est supprimée.
 4. **Règlement** : paiement ajouté avec `closepaidinvoices=yes`, à la date de facturation,

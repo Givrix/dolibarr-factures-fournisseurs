@@ -105,6 +105,14 @@ class FakeDolibarr:
         self._record("supplierinvoicesAddPayment", {"id": invoice_id, **payload})
         return {"id": 1, "amount": 120.0}
 
+    async def reopen_supplier_invoice(self, invoice_id: int) -> Any:
+        self._record("supplierinvoicesSettounpaid", {"id": invoice_id})
+        return {"success": {"code": 200, "message": "Invoice reopened"}}
+
+    async def set_supplier_invoice_draft(self, invoice_id: int) -> Any:
+        self._record("supplierinvoicesSettodraft", {"id": invoice_id})
+        return {"id": invoice_id, "status": "0"}
+
     async def mark_supplier_invoice_paid(self, invoice_id: int, close_note: str = "") -> Any:
         self._record("supplierinvoicesSettopaid", {"id": invoice_id, "close_note": close_note})
         return {"success": {"code": 200, "message": "Invoice classified as paid"}}
@@ -418,7 +426,7 @@ async def test_duplicate_invoice_is_skipped(monkeypatch: pytest.MonkeyPatch):
     assert not dolibarr.calls_to("supplierinvoicesAddPayment")
 
 
-async def test_duplicate_with_different_total_is_reimported(monkeypatch: pytest.MonkeyPatch):
+async def test_duplicate_with_different_total_is_replaced(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     dolibarr.existing_invoices = [
         {"id": 55, "ref": "FF2504-0042", "ref_supplier": "FA-2025-042", "total_ttc": 44.78}
@@ -429,10 +437,28 @@ async def test_duplicate_with_different_total_is_reimported(monkeypatch: pytest.
         monkeypatch, {"library_name_or_id": "Factures", "supplier_name": "ACME"}
     )
 
-    assert [doc["status"] for doc in result["documents"][:1]] == ["paid"]
-    assert "44.78" in (result["documents"][0]["detail"] or "")
-    assert "FF2504-0042" in (result["documents"][0]["detail"] or "")
-    assert dolibarr.calls_to("createSupplierinvoices")
+    doc = result["documents"][0]
+    assert doc["status"] == "paid"
+    assert "44.78" in (doc["detail"] or "")
+    assert "FF2504-0042" in (doc["detail"] or "")
+    assert "supprimée" in (doc["detail"] or "")
+
+    names = [name for name, _ in dolibarr.calls]
+    old_position = next(i for i, name in enumerate(names) if name == "removeSupplierinvoices" and dolibarr.calls[i][1]["id"] == 55)
+    create_position = next(i for i, name in enumerate(names) if name == "createSupplierinvoices")
+    assert old_position < create_position
+    assert dolibarr.calls_to("supplierinvoicesSettounpaid")
+    assert dolibarr.calls_to("supplierinvoicesSettodraft")
+
+
+def test_same_amount_variants():
+    from worker.workflows.supplier_invoices import ExtractedInvoice, _same_amount
+
+    extracted = ExtractedInvoice(total_ttc=120.0)
+    assert _same_amount({"total_ttc": "120.00"}, extracted)
+    assert not _same_amount({"total_ttc": 44.78}, extracted)
+    assert _same_amount({"total_ht": 100.0}, ExtractedInvoice(total_ttc=None, total_ht=100.0))
+    assert _same_amount({}, extracted)  # pas de total comparable : considéré identique
 
 
 async def test_duplicate_with_matching_total_is_skipped(monkeypatch: pytest.MonkeyPatch):
@@ -469,6 +495,28 @@ async def test_duplicate_with_different_total_can_be_kept(monkeypatch: pytest.Mo
     assert [doc["status"] for doc in result["documents"][:1]] == ["skipped_duplicate"]
     assert "Doublon avec total différent" in (result["documents"][0]["detail"] or "")
     assert not dolibarr.calls_to("createSupplierinvoices")
+
+
+async def test_force_reimport_replaces_even_matching_duplicate(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    dolibarr.existing_invoices = [
+        {"id": 55, "ref": "FF2504-0042", "ref_supplier": "FA-2025-042", "total_ttc": 120.0}
+    ]
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {
+            "library_name_or_id": "Factures",
+            "supplier_name": "ACME",
+            "force_reimport": True,
+        },
+    )
+
+    doc = result["documents"][0]
+    assert doc["status"] == "paid"
+    assert dolibarr.calls_to("removeSupplierinvoices")
+    assert dolibarr.calls_to("createSupplierinvoices")
 
 
 async def test_extraction_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyPatch):
