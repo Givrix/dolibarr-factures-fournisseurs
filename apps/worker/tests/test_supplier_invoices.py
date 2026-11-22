@@ -479,7 +479,24 @@ async def test_duplicate_with_matching_total_is_skipped(monkeypatch: pytest.Monk
 
     assert [doc["status"] for doc in result["documents"][:1]] == ["skipped_duplicate"]
     assert not dolibarr.calls_to("createSupplierinvoices")
+    assert client.beta.libraries.documents.deleted[:1] == ["doc-1"]
 
+
+async def test_duplicate_mismatch_kept_keeps_pdf(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    dolibarr.existing_invoices = [
+        {"id": 55, "ref": "FF2504-0042", "ref_supplier": "FA-2025-042", "total_ttc": 44.78}
+    ]
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {
+            "library_name_or_id": "Factures",
+            "supplier_name": "ACME",
+            "replace_mismatched_duplicates": False,
+        },
+    )
 
 async def test_duplicate_with_different_total_can_be_kept(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
@@ -500,6 +517,8 @@ async def test_duplicate_with_different_total_can_be_kept(monkeypatch: pytest.Mo
     assert [doc["status"] for doc in result["documents"][:1]] == ["skipped_duplicate"]
     assert "Doublon avec total différent" in (result["documents"][0]["detail"] or "")
     assert not dolibarr.calls_to("createSupplierinvoices")
+    assert client.beta.libraries.documents.deleted[:1] == []
+
 
 
 async def test_duplicate_with_payment_cannot_be_removed_autoratically(

@@ -44,7 +44,8 @@ Pour chaque PDF de la bibliothèque :
    remise est réaligné sur le taux commun quand le total TTC imprimé le confirme ; les
    incohérences résiduelles lignes/totaux sont signalées en avertissement.
 2. **Anti-doublon** : si une facture fournisseur avec la même `ref_supplier` existe déjà
-   pour ce tiers au même total, le document est marqué `skipped_duplicate`. Si le total
+   pour ce tiers au même total, le document est marqué `skipped_duplicate` et le PDF est
+   supprimé de la bibliothèque (doublon conforme). Si le total
    diffère (import précédent erroné), l'ancienne facture est réouverte, passée en brouillon
    puis supprimée via l'API Dolibarr, et la version corrigée est importée à sa place.
    `--no-replace-mismatched` conserve le comportement bloquant, `--force-reimport`

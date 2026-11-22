@@ -787,7 +787,8 @@ async def create_supplier_invoice(
             )
             if not must_reimport:
                 old = existing[0]
-                if any(_same_amount(candidate, extracted) for candidate in existing):
+                conforming = any(_same_amount(candidate, extracted) for candidate in existing)
+                if conforming:
                     detail = f"Facture fournisseur '{supplier_ref}' déjà présente dans Dolibarr"
                 else:
                     detail = (
@@ -800,6 +801,7 @@ async def create_supplier_invoice(
                     "invoice_id": int(old["id"]),
                     "invoice_ref": old.get("ref"),
                     "detail": detail,
+                    "conforming_duplicate": conforming,
                 }
             old = existing[0]
             old_label = old.get("ref") or old.get("id")
@@ -1044,13 +1046,20 @@ async def _process_document(
             force_reimport=force_reimport,
         )
         if created["status"] != "created":
-            return DocumentResult(
+            result = DocumentResult(
                 document=document_name,
                 status=created["status"],
                 invoice_id=created.get("invoice_id"),
                 invoice_ref=created.get("invoice_ref"),
                 detail=created.get("detail"),
             )
+            if created["status"] == "skipped_duplicate" and created.get("conforming_duplicate"):
+                try:
+                    await delete_library_document(library_id=library_id, document_id=document_id)
+                except Exception as error:
+                    note = f"Suppression du PDF de la bibliothèque impossible : {_error_text(error)}"
+                    result.detail = f"{result.detail} | {note}" if result.detail else note
+            return result
         created_id = created["invoice_id"]
         created_ref = created.get("invoice_ref")
 
