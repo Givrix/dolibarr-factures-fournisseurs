@@ -37,7 +37,12 @@ Entrée du workflow `dolibarr-supplier-invoices-import` :
 Pour chaque PDF de la bibliothèque :
 
 1. **Extraction** : le texte OCR de la bibliothèque est analysé par `mistral-medium-latest`
-   (sortie structurée : date, référence fournisseur, lignes, totaux, TVA).
+   (sortie structurée : date, référence fournisseur, lignes, totaux, TVA). Les montants
+   recopiés en chaîne (virgule décimale, espaces fines ou insécables) sont convertis, une
+   ligne sans quantité vaut quantité 1, et une ligne définitivement inexploitable est
+   écartée au lieu de faire échouer le document. Un taux de TVA a zéro sur une ligne de
+   remise est réaligné sur le taux commun quand le total TTC imprimé le confirme ; les
+   incohérences résiduelles lignes/totaux sont signalées en avertissement.
 2. **Anti-doublon** : si une facture fournisseur avec la même `ref_supplier` existe déjà
    pour ce tiers au même total, le document est marqué `skipped_duplicate`. Si le total
    diffère (import précédent erroné), l'ancienne facture est réouverte, passée en brouillon

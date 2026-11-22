@@ -401,6 +401,41 @@ def _amount_warnings(invoice: ExtractedInvoice) -> list[str]:
     return warnings
 
 
+def _harmonize_vat_rates(invoice: ExtractedInvoice) -> list[str]:
+    """Raligne les taux de TVA a zero aberrants sur le total TTC imprime de la facture.
+
+    L'extraction attribue parfois 0 % a une ligne de remise, alors que sur la facture
+    elle subit le meme taux que les lignes qu'elle corrige. Quand un unique taux non
+    nul, applique a toutes les lignes, retombe exactement sur le total TTC imprime,
+    il remplace les taux a zero (le total TTC imprime fait foi).
+    """
+    if not invoice.lines or invoice.total_ttc is None:
+        return []
+    rates = {line.vat_rate for line in invoice.lines if line.vat_rate is not None}
+    rates.discard(0.0)
+    if len(rates) != 1 or not any(line.vat_rate == 0.0 for line in invoice.lines):
+        return []
+    candidate = rates.pop()
+    pairs = [(line, _line_ht_amount(line)) for line in invoice.lines]
+    if any(amount is None for _, amount in pairs):
+        return []
+    uniform_ttc = round(
+        sum(amount * (1.0 + candidate / 100.0) for _, amount in pairs), 2
+    )
+    if abs(uniform_ttc - invoice.total_ttc) > 0.05:
+        return []
+    notes: list[str] = []
+    for line, _ in pairs:
+        if line.vat_rate != 0.0:
+            continue
+        line.vat_rate = candidate
+        notes.append(
+            f"Taux de TVA de la ligne '{line.description}' raligne a "
+            f"{candidate} % (total TTC de la facture)"
+        )
+    return notes
+
+
 def _compute_lines(invoice: ExtractedInvoice) -> list[dict[str, Any]]:
     if invoice.lines:
         lines = []
@@ -610,9 +645,11 @@ async def extract_invoice_data(
                     "le total HT de la ligne quand il figure sur la facture, total_ht est le "
                     "total HT de toute la facture : ne confonds jamais ces colonnes et ne recopie "
                     "jamais un sous-total ou un total de facture dans une ligne ; les taux de TVA "
-                    "sont en pourcentage (20 pour 20 %). S'il existe une remise, un rabais, une "
-                    "réduction, un coupon, un crédit appliqué ou toute ligne correctrice négative, "
-                    "extrais-la comme une ligne avec unit_price_ht et line_total_ht NÉGATIFS. "
+                    "sont en pourcentage (20 pour 20 %), recopiés depuis la colonne TVA de la "
+                    "ligne du document : ne mets jamais 0 par défaut. Une remise, un rabais, une "
+                    "réduction, un coupon ou tout crédit appliqué est une ligne correctrice "
+                    "NÉGATIVE (unit_price_ht et line_total_ht négatifs) qui subit en général le "
+                    "même taux de TVA que les lignes qu'elle corrige. "
                     "total_ht et total_ttc sont les totaux définitifs de la facture, une fois les "
                     "remises déduites. Quand une ligne affiche à la fois un prix unitaire et un "
                     "total, line_total_ht doit être la valeur affichée pour cette ligne."
@@ -621,6 +658,7 @@ async def extract_invoice_data(
             {"role": "user", "content": f"Document : {document_name}\n\n{str(text)[:60000]}"},
         ],
         response_format={"type": "json_object"},
+        temperature=0,
     )
     message = response.choices[0].message
     if isinstance(message.content, str):
@@ -646,6 +684,7 @@ async def extract_invoice_data(
                 parse_error = None
     if invoice is not None and not invoice.is_invoice:
         return {"status": "skipped_not_invoice", "detail": None, "invoice": None}
+    vat_notes = _harmonize_vat_rates(invoice) if invoice is not None else []
     normalized_date = _normalize_date(invoice.invoice_date) if invoice else None
     if not normalized_date:
         normalized_date = _find_date_in_text(str(text))
@@ -666,7 +705,7 @@ async def extract_invoice_data(
         "status": "ok",
         "detail": None,
         "invoice": invoice.model_dump(),
-        "warnings": _amount_warnings(invoice),
+        "warnings": _amount_warnings(invoice) + vat_notes,
     }
 
 

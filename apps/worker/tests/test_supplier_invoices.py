@@ -685,6 +685,36 @@ async def test_extract_salvages_invoice_with_invalid_line(monkeypatch: pytest.Mo
     ]
 
 
+async def test_extract_harmonizes_discount_vat_rate(monkeypatch: pytest.MonkeyPatch):
+    dolibarr, client = base_fixtures()
+    client.chat.content_override = json.dumps(
+        {
+            "is_invoice": True,
+            "invoice_date": "2021-10-01",
+            "supplier_ref": "786350",
+            "lines": [
+                {"description": "Bronze D1", "quantity": 1, "unit_price_ht": 7.95, "line_total_ht": 7.95, "vat_rate": 20.0},
+                {"description": "20% Off Non Profit", "quantity": 1, "unit_price_ht": -1.59, "line_total_ht": -1.59, "vat_rate": 0.0},
+            ],
+            "total_ht": 6.36,
+            "total_ttc": 7.63,
+        }
+    )
+    install_fakes(monkeypatch, dolibarr, client)
+
+    result = await run_workflow(
+        monkeypatch,
+        {"library_name_or_id": "Factures", "supplier_name": "ACME", "dry_run": True},
+    )
+
+    doc = result["documents"][0]
+    assert doc["status"] == "dry_run"
+    assert "Somme des lignes TTC" not in (doc["detail"] or "")
+    assert "raligne a 20.0 %" in (doc["detail"] or "")
+    json_part = (doc["detail"] or "").rsplit(" | ", 1)[-1]
+    assert all(line["vat_rate"] == 20.0 for line in json.loads(json_part)["lignes"])
+
+
 async def test_zero_amount_invoice_is_classified_paid(monkeypatch: pytest.MonkeyPatch):
     dolibarr, client = base_fixtures()
     client.chat.extraction = {
@@ -1017,6 +1047,56 @@ def test_invoice_line_quantity_null_becomes_one():
         {"description": "FORMULE BRONZE PREMIUM", "quantity": None, "unit_price_ht": 14.95}
     )
     assert line.quantity == 1.0
+
+
+def test_vat_harmonization_aligns_discount_line_from_invoice_total():
+    invoice = si.ExtractedInvoice.model_validate(
+        {
+            "lines": [
+                {"description": "Bronze D1", "quantity": 1, "unit_price_ht": 7.95, "line_total_ht": 7.95, "vat_rate": 20.0},
+                {"description": "20% Non Profit Discount", "quantity": 1, "unit_price_ht": -1.59, "line_total_ht": -1.59, "vat_rate": 0.0},
+            ],
+            "total_ht": 6.36,
+            "total_ttc": 7.63,
+        }
+    )
+    notes = si._harmonize_vat_rates(invoice)
+    assert invoice.lines[1].vat_rate == 20.0
+    assert ["Taux de TVA de la ligne '20% Non Profit Discount' raligne a 20.0 % (total TTC de la facture)"] == notes
+    assert si._amount_warnings(invoice) == []
+    lines = si._compute_lines(invoice)
+    assert all(line["tva_tx"] == 20.0 for line in lines)
+
+
+def test_vat_harmonization_kept_out_when_total_disagrees():
+    invoice = si.ExtractedInvoice.model_validate(
+        {
+            "lines": [
+                {"description": "Article", "quantity": 1, "unit_price_ht": 10.0, "line_total_ht": 10.0, "vat_rate": 20.0},
+                {"description": "Livraison", "quantity": 1, "unit_price_ht": 6.36, "line_total_ht": 6.36, "vat_rate": 0.0},
+            ],
+            "total_ht": 16.36,
+            "total_ttc": 18.36,
+        }
+    )
+    assert si._harmonize_vat_rates(invoice) == []
+    assert invoice.lines[1].vat_rate == 0.0
+
+
+def test_vat_harmonization_requires_single_nonzero_rate():
+    invoice = si.ExtractedInvoice.model_validate(
+        {
+            "lines": [
+                {"description": "A", "quantity": 1, "unit_price_ht": 5.0, "line_total_ht": 5.0, "vat_rate": 20.0},
+                {"description": "B", "quantity": 1, "unit_price_ht": 5.0, "line_total_ht": 5.0, "vat_rate": 10.0},
+                {"description": "Remise", "quantity": 1, "unit_price_ht": -1.0, "line_total_ht": -1.0, "vat_rate": 0.0},
+            ],
+            "total_ht": 9.0,
+            "total_ttc": 11.4,
+        }
+    )
+    assert si._harmonize_vat_rates(invoice) == []
+    assert invoice.lines[2].vat_rate == 0.0
 
 
 def test_compute_lines_uses_default_quantity_when_null():
